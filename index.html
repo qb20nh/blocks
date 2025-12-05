@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3x Screw Tetracube Solution 3D</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; font-family: sans-serif; }
+        #controls-help {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: #888;
+            font-size: 12px;
+            pointer-events: none;
+        }
+        #ui-container {
+            position: absolute;
+            top: 60px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            pointer-events: auto;
+            align-items: flex-end;
+        }
+        .btn {
+            padding: 10px 20px;
+            background: #333;
+            color: white;
+            border: 1px solid #555;
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 14px;
+            transition: background 0.3s;
+            width: 160px; /* Adjusted width */
+        }
+        .btn:hover {
+            background: #555;
+        }
+        .btn:disabled {
+            background: #222;
+            color: #555;
+            cursor: default;
+            border-color: #333;
+        }
+        #status {
+            color: #aaa;
+            font-size: 14px;
+            margin-bottom: 5px;
+        }
+    </style>
+    <!-- Load Three.js from CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Load OrbitControls -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+    
+    <div id="ui-container">
+        <div id="status">Piece: 0 / 0</div>
+        <button id="next-btn" class="btn">Next Block</button>
+        <button id="proj-btn" class="btn">View: Perspective</button>
+        <button id="skel-btn" class="btn">Skeleton: ON</button>
+        <button id="reset-btn" class="btn">Reset</button>
+    </div>
+
+    <div id="controls-help">
+        Left Click: Rotate | Right Click: Pan | Scroll: Zoom
+    </div>
+
+    <script src="main.js"></script>
+</body>
+</html>
