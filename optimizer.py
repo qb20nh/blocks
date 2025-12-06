@@ -574,7 +574,7 @@ class ColorOptimizer:
                         eta_str = "Calculating..."
                     
                     progress = (current_iter / self.iterations) * 100
-                    print(f"Iter {current_iter}/{self.iterations} ({progress:.1f}%): Temp={temp:.4f}, Score={current_score:.4f} (Min={current_min_dist:.4f}, Std={current_std_dev:.4f}) ETA: {eta_str}")
+                    print(f"Iter {current_iter}/{self.iterations} ({progress:.1f}%): Temp={temp:.4f}, Score={current_score:.4f} (Min={current_min_dist:.4f}, Std={current_std_dev:.4f}) Speed={iterations_per_sec:.2f} it/s ETA: {eta_str}")
 
             # --- Extended Optimization Phase ---
             print("\nEntering Extended Optimization Phase (Refining)...")

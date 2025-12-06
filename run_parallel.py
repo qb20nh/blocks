@@ -121,7 +121,24 @@ def run_optimizer(n):
                         # Example: Iter 100/1000 (10.0%): Temp=..., Score=... ETA: ...
                         parts = line.split("):")
                         if len(parts) > 1:
-                            queue.put((n, parts[0] + ") " + parts[1].split("ETA:")[1].strip() if "ETA:" in parts[1] else line))
+                            # Parse speed if present
+                            if "Speed=" in line:
+                                try:
+                                    speed_str = line.split("Speed=")[1].split("it/s")[0].strip()
+                                    speed = float(speed_str)
+                                    queue.put(('SPEED', n, speed))
+                                except:
+                                    pass
+                            
+                            # Clean up line for display
+                            display_line = parts[0] + ") " + parts[1].split("ETA:")[1].strip() if "ETA:" in parts[1] else line
+                            # Remove Speed=... from display line if present to keep it short
+                            if "Speed=" in display_line:
+                                pre_speed = display_line.split("Speed=")[0].strip()
+                                post_speed = display_line.split("it/s")[1].strip() if "it/s" in display_line else ""
+                                display_line = f"{pre_speed} {post_speed}".strip()
+                                
+                            queue.put((n, display_line))
                         else:
                             queue.put((n, line))
                     except:
@@ -166,6 +183,7 @@ def display_manager(queue, nums, num_threads, stop_event):
     sys.stdout.flush()
     
     status_map = {n: "Waiting..." for n in nums}
+    speed_map = {n: 0.0 for n in nums}
     
     # Determine layout
     columns, lines = shutil.get_terminal_size()
@@ -181,15 +199,27 @@ def display_manager(queue, nums, num_threads, stop_event):
         try:
             # Process all available messages
             while True:
-                n, msg = queue.get_nowait()
-                status_map[n] = msg
+                item = queue.get_nowait()
+                if isinstance(item, tuple) and len(item) == 3 and item[0] == 'SPEED':
+                    _, n, speed = item
+                    speed_map[n] = speed
+                else:
+                    n, msg = item
+                    status_map[n] = msg
         except:
             pass
             
         # Redraw
         # Move to home
         sys.stdout.write(ANSI_HOME)
-        print(f"Parallel Optimizer Progress ({num_threads} threads)")
+        total_speed = sum(speed_map.values())
+        title = f"Parallel Optimizer Progress ({num_threads} threads)"
+        speed_info = f"Total: {total_speed:,.0f} it/s"
+        padding = columns - len(title) - len(speed_info) - 2
+        if padding > 0:
+            print(f"{title}{' ' * padding}{speed_info}")
+        else:
+            print(title)
         print("-" * columns)
         
         # Print tasks in two columns if possible
