@@ -1,6 +1,6 @@
 import numpy as np
 import time
-import pickle
+import json
 import os
 import signal
 import sys
@@ -367,7 +367,7 @@ class ColorOptimizer:
 
         # Ensure results directory exists
         os.makedirs("results", exist_ok=True)
-        self.state_file = os.path.join("results", f"optimizer_state_{num_colors}.pkl")
+        self.state_file = os.path.join("results", f"optimizer_state_{num_colors}.json")
         self.result_file = os.path.join("results", f"colors_{num_colors}.txt")
         self.start_iteration = 0
         
@@ -417,20 +417,20 @@ class ColorOptimizer:
         print(f"\nSaving state at iteration {iteration} (Ext: {ext_iter})...")
         state = {
             'iteration': iteration,
-            'colors_oklch': self.colors_oklch,
-            'current_score': current_score,
-            'current_min_dist': current_min_dist,
-            'current_std_dev': current_std_dev,
-            'best_score': best_score,
-            'best_colors': best_colors,
-            'best_min_dist': best_min_dist,
+            'colors_oklch': self.colors_oklch.tolist(),
+            'current_score': float(current_score),
+            'current_min_dist': float(current_min_dist),
+            'current_std_dev': float(current_std_dev),
+            'best_score': float(best_score),
+            'best_colors': best_colors.tolist(),
+            'best_min_dist': float(best_min_dist),
             'rng_state': self.rng.bit_generator.state,
-            'ext_iter': ext_iter,
-            'iters_since_improvement': iters_since_improvement,
-            'last_improvement_val': last_improvement_val
+            'ext_iter': int(ext_iter),
+            'iters_since_improvement': int(iters_since_improvement),
+            'last_improvement_val': float(last_improvement_val)
         }
-        with open(self.state_file, 'wb') as f:
-            pickle.dump(state, f)
+        with open(self.state_file, 'w') as f:
+            json.dump(state, f, indent=2)
         print("State saved.")
 
     def load_state(self):
@@ -438,17 +438,21 @@ class ColorOptimizer:
         if os.path.exists(self.state_file):
             print(f"Found saved state file: {self.state_file}")
             try:
-                with open(self.state_file, 'rb') as f:
-                    state = pickle.load(f)
+                with open(self.state_file, 'r') as f:
+                    state = json.load(f)
                 
                 self.start_iteration = state['iteration']
-                self.colors_oklch = state['colors_oklch']
+                self.colors_oklch = np.array(state['colors_oklch'])
                 self.rng.bit_generator.state = state['rng_state']
                 
                 # Load extended phase state if available
                 self.ext_iter_start = state.get('ext_iter', 0)
                 self.iters_since_improvement_start = state.get('iters_since_improvement', 0)
                 self.last_improvement_val_start = state.get('last_improvement_val', 0.0)
+                
+                # Restore best_colors if present (it should be)
+                if 'best_colors' in state:
+                    state['best_colors'] = np.array(state['best_colors'])
                 
                 print(f"Resuming from iteration {self.start_iteration} (Ext: {self.ext_iter_start})")
                 return True, state
