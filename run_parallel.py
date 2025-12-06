@@ -5,6 +5,38 @@ import sys
 import time
 import threading
 import shutil
+import argparse
+
+# Priority Map for Windows
+PRIORITY_MAP = {
+    'low': 0x00000040, # IDLE_PRIORITY_CLASS
+    'below_normal': 0x00004000, # BELOW_NORMAL_PRIORITY_CLASS
+    'normal': 0x00000020, # NORMAL_PRIORITY_CLASS
+    'above_normal': 0x00008000, # ABOVE_NORMAL_PRIORITY_CLASS
+    'high': 0x00000080, # HIGH_PRIORITY_CLASS
+    'realtime': 0x00000100 # REALTIME_PRIORITY_CLASS
+}
+
+def parse_range(range_str):
+    """Parses a range string (e.g., '3-5,10') into a sorted list of integers."""
+    nums = set()
+    parts = range_str.split(',')
+    for part in parts:
+        part = part.strip()
+        if '-' in part:
+            try:
+                start, end = map(int, part.split('-'))
+                nums.update(range(start, end + 1))
+            except ValueError:
+                print(f"Error: Invalid range format '{part}'")
+                sys.exit(1)
+        else:
+            try:
+                nums.add(int(part))
+            except ValueError:
+                print(f"Error: Invalid number '{part}'")
+                sys.exit(1)
+    return sorted(list(nums))
 
 # ANSI escape codes
 ANSI_RESET = "\033[0m"
@@ -13,10 +45,12 @@ ANSI_HOME = "\033[H"
 ANSI_CURSOR_UP = "\033[A"
 ANSI_CLEAR_LINE = "\033[K"
 
-def init_worker(q):
-    """Initialize worker with the queue."""
-    global queue
+def init_worker(q, priority_level, force_fresh):
+    """Initialize worker with the queue and settings."""
+    global queue, WORKER_PRIORITY, FORCE_FRESH
     queue = q
+    WORKER_PRIORITY = priority_level
+    FORCE_FRESH = force_fresh
 
 def run_optimizer(n):
     """Runs the optimizer for a specific number of colors."""
@@ -32,7 +66,10 @@ def run_optimizer(n):
     # Check if already done
     result_file = os.path.join("results", f"colors_{n}.txt")
     state_file = os.path.join("results", f"optimizer_state_{n}.pkl")
-    if os.path.exists(result_file) and not os.path.exists(state_file):
+    
+    if FORCE_FRESH:
+        pass # Skip check, let optimizer handle it
+    elif os.path.exists(result_file) and not os.path.exists(state_file):
         queue.put((n, "Skipped (Already done)"))
         return n, True, "Skipped"
 
@@ -40,14 +77,19 @@ def run_optimizer(n):
     try:
         queue.put((n, "Starting..."))
         
-        # Set process priority to HIGH_PRIORITY_CLASS (0x00000080) on Windows
+        # Set process priority
         creationflags = 0
         if sys.platform == "win32":
-            creationflags = getattr(subprocess, "HIGH_PRIORITY_CLASS", 0x00000080)
+            creationflags = WORKER_PRIORITY
+
+        # Build command
+        cmd = [sys.executable, "-u", "optimizer.py", "-n", str(n)]
+        if FORCE_FRESH:
+            cmd.append("--force")
 
         # Run the optimizer script with unbuffered output
         process = subprocess.Popen(
-            [sys.executable, "-u", "optimizer.py", "-n", str(n)],
+            cmd,
             env=env,
             creationflags=creationflags,
             stdout=subprocess.PIPE,
@@ -88,8 +130,14 @@ def run_optimizer(n):
                     queue.put((n, "Ext Phase Done"))
                 elif "Final" in line:
                     queue.put((n, "Finalizing..."))
-                elif "TSP" in line:
+                elif "Sorting colors" in line:
                     queue.put((n, "TSP Sorting..."))
+                elif "Force fresh start" in line:
+                    queue.put((n, "Cleaning..."))
+                elif "Resuming" in line:
+                    queue.put((n, "Resuming..."))
+                elif "Optimizing" in line and "colors" in line:
+                    queue.put((n, "Initializing..."))
         
         process.wait()
         
@@ -110,14 +158,14 @@ def run_optimizer(n):
         queue.put((n, f"Error: {str(e)}"))
         return n, False, str(e)
 
-def display_manager(queue, num_tasks, stop_event):
+def display_manager(queue, nums, num_threads, stop_event):
     """Manages the display of progress lines."""
     # Clear screen initially
     sys.stdout.write(ANSI_CLEAR_SCREEN)
     sys.stdout.write(ANSI_HOME)
     sys.stdout.flush()
     
-    status_map = {n: "Waiting..." for n in range(3, 33)}
+    status_map = {n: "Waiting..." for n in nums}
     
     # Determine layout
     columns, lines = shutil.get_terminal_size()
@@ -141,18 +189,20 @@ def display_manager(queue, num_tasks, stop_event):
         # Redraw
         # Move to home
         sys.stdout.write(ANSI_HOME)
-        print(f"Parallel Optimizer Progress ({multiprocessing.cpu_count()} cores)")
+        print(f"Parallel Optimizer Progress ({num_threads} threads)")
         print("-" * columns)
         
         # Print tasks in two columns if possible
-        half = (33 - 3 + 1) // 2 + (33 - 3 + 1) % 2
+        num_tasks = len(nums)
+        half = (num_tasks + 1) // 2
+        
         for i in range(half):
-            n1 = 3 + i
-            n2 = 3 + i + half
-            
+            n1 = nums[i]
             s1 = f"n={n1:<2}: {status_map.get(n1, '')[:col_width]:<{col_width}}"
+            
             s2 = ""
-            if n2 <= 32:
+            if i + half < num_tasks:
+                n2 = nums[i + half]
                 s2 = f" | n={n2:<2}: {status_map.get(n2, '')[:col_width]:<{col_width}}"
             
             print(f"{s1}{s2}" + ANSI_CLEAR_LINE)
@@ -201,25 +251,61 @@ def prevent_sleep():
     return PreventSleep()
 
 def main():
+    parser = argparse.ArgumentParser(description="Run parallel color optimization.")
+    parser.add_argument("-t", "--threads", type=int, default=os.cpu_count(), help="Number of threads (processes) to use.")
+    parser.add_argument("-p", "--priority", type=str, choices=PRIORITY_MAP.keys(), default="high", help="Process priority.")
+    parser.add_argument("-r", "--range", type=str, required=True, help="Range of N values (e.g., '3-32', '5,10-15').")
+    parser.add_argument("-f", "--force", action="store_true", help="Force start fresh (ignore/delete existing results).")
+    
+    args = parser.parse_args()
+    
+    # Validation
+    cpu_count = os.cpu_count()
+    if args.threads > cpu_count:
+        print(f"Error: Requested threads ({args.threads}) exceeds CPU count ({cpu_count}).")
+        sys.exit(1)
+        
+    if args.priority == 'realtime' and args.threads >= cpu_count:
+        print(f"Error: Cannot run with realtime priority and threads >= CPU count ({cpu_count}). This will freeze your system.")
+        sys.exit(1)
+        
+    # Confirmation for High Priority + All Cores
+    if args.priority == 'high' and args.threads == cpu_count:
+        print(f"Warning: Running with HIGH priority on ALL cores ({cpu_count}). System responsiveness will drop dramatically.")
+        response = input("Continue? (y/n): ").strip().lower()
+        if response not in ['y', 'yes']:
+            print("Operation cancelled.")
+            sys.exit(0)
+
+    # Parse range
+    nums = parse_range(args.range)
+    if not nums:
+        print("Error: No valid numbers in range.")
+        sys.exit(1)
+
+    # Cap threads to number of tasks
+    num_tasks = len(nums)
+    if args.threads > num_tasks:
+        print(f"Info: Requested threads ({args.threads}) > tasks ({num_tasks}). Reducing threads to {num_tasks}.")
+        args.threads = num_tasks
+
     # Warmup to prevent race conditions in Numba compilation
     warmup()
 
-    # Range from 3 to 32 (inclusive)
-    nums = list(range(3, 33))
-    num_cores = os.cpu_count()
-    
     # Use standard multiprocessing.Queue instead of Manager
     queue = multiprocessing.Queue()
     stop_event = threading.Event()
     
     # Start display thread
-    display_thread = threading.Thread(target=display_manager, args=(queue, len(nums), stop_event))
+    display_thread = threading.Thread(target=display_manager, args=(queue, nums, args.threads, stop_event))
     display_thread.start()
+    
+    priority_val = PRIORITY_MAP[args.priority]
     
     try:
         with prevent_sleep():
             # Use initializer to pass queue to workers
-            with multiprocessing.Pool(processes=num_cores, initializer=init_worker, initargs=(queue,)) as pool:
+            with multiprocessing.Pool(processes=args.threads, initializer=init_worker, initargs=(queue, priority_val, args.force)) as pool:
                 # Map just the numbers, worker uses global queue
                 results = pool.map(run_optimizer, nums)
     finally:

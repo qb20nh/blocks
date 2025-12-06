@@ -343,8 +343,9 @@ def run_batch_optimization(
     )
 
 class ColorOptimizer:
-    def __init__(self, num_colors=27, iterations=None, tsp_iterations=None):
+    def __init__(self, num_colors=27, iterations=None, tsp_iterations=None, force_fresh=False):
         self.num_colors = num_colors
+        self.force_fresh = force_fresh
         self.rng = np.random.default_rng(42)
         
         # Simulated Annealing parameters
@@ -367,6 +368,7 @@ class ColorOptimizer:
         # Ensure results directory exists
         os.makedirs("results", exist_ok=True)
         self.state_file = os.path.join("results", f"optimizer_state_{num_colors}.pkl")
+        self.result_file = os.path.join("results", f"colors_{num_colors}.txt")
         self.start_iteration = 0
         
         # TSP parameters
@@ -459,7 +461,25 @@ class ColorOptimizer:
         print(f"Optimizing {self.num_colors} colors using Hybrid Simulated Annealing...")
         
         # Try to load state
-        loaded, state = self.load_state()
+        loaded = False
+        state = None
+        if self.force_fresh:
+            print("Force fresh start: Deleting existing state and results...")
+            if os.path.exists(self.state_file):
+                try:
+                    os.remove(self.state_file)
+                    print(f"Deleted state file: {self.state_file}")
+                except OSError as e:
+                    print(f"Error deleting state file: {e}")
+            
+            if os.path.exists(self.result_file):
+                try:
+                    os.remove(self.result_file)
+                    print(f"Deleted result file: {self.result_file}")
+                except OSError as e:
+                    print(f"Error deleting result file: {e}")
+        else:
+            loaded, state = self.load_state()
         
         if loaded:
             current_score = state['current_score']
@@ -758,11 +778,12 @@ if __name__ == "__main__":
     parser.add_argument("-n", "--num_colors", type=int, required=True, help="Number of colors to optimize")
     parser.add_argument("--iterations", type=int, help="Number of SA iterations (default: auto-scaled)")
     parser.add_argument("--tsp_iterations", type=int, help="Number of TSP iterations (default: auto-scaled)")
+    parser.add_argument("-f", "--force", action="store_true", help="Force start fresh (ignore existing state)")
     
     args = parser.parse_args()
     
     try:
-        opt = ColorOptimizer(num_colors=args.num_colors, iterations=args.iterations, tsp_iterations=args.tsp_iterations)
+        opt = ColorOptimizer(num_colors=args.num_colors, iterations=args.iterations, tsp_iterations=args.tsp_iterations, force_fresh=args.force)
         opt.optimize()
         
         oklch, srgb = opt.get_results()
