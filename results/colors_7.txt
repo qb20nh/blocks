@@ -1,0 +1,18 @@
+--- Iterations ---
+Total Iterations: 6,731,859
+Ext Iterations: 10,323
+TSP Iterations: 6,721
+
+--- Statistics ---
+Minimum Distance: 0.35041
+Std Dev of NN Distances: 0.00001
+
+--- Final Colors ---
+Index  Hex      R,G,B          L        C        H
+0      #080004  8,0,4          0.089    0.038    343.8
+1      #166200  22,98,0        0.435    0.142    140.6
+2      #01d802  1,216,2        0.765    0.260    142.5
+3      #ffffff  255,255,255    1.000    0.000    264.8
+4      #00a2fd  0,162,253      0.687    0.173    245.0
+5      #c1016a  193,1,106      0.527    0.214    357.9
+6      #0300b4  3,0,180        0.348    0.240    264.5

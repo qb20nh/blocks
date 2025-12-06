@@ -4,6 +4,7 @@ import pickle
 import os
 import signal
 import sys
+import argparse
 import numba
 from numba import jit as njit
 
@@ -185,17 +186,198 @@ def calculate_metrics(oklch):
 def calculate_score(min_dist, std_dev):
     return min_dist - 1.0 * std_dev
 
+@numba.jit(nopython=True)
+def run_batch_optimization(
+    colors_oklch, 
+    colors_oklab,
+    dist_sq,
+    start_iter, 
+    num_iters, 
+    total_iters_for_temp, # For exponential schedule
+    initial_temp, 
+    final_temp, 
+    phase, # 0=Normal, 1=Extended
+    current_score, 
+    current_min_dist, 
+    current_std_dev,
+    best_score, 
+    best_colors, 
+    best_min_dist,
+    seed,
+    ext_iter_offset=0,
+    max_ext_iters=0,
+    iters_since_improvement=0,
+    last_improvement_val=0.0
+):
+    np.random.seed(seed)
+    n = colors_oklch.shape[0]
+    
+    # Pre-allocate for temporary calculations
+    old_row = np.empty(n, dtype=np.float64)
+    
+    for i in range(num_iters):
+        current_iter = start_iter + i
+        
+        # Temperature Schedule
+        if phase == 0: # Normal
+            temp = initial_temp * ((final_temp / initial_temp) ** (current_iter / total_iters_for_temp))
+        else: # Extended
+            eff_ext_iter = current_iter # This is actually ext_iter
+            progress = eff_ext_iter / max_ext_iters
+            if progress >= 1.0:
+                temp = 0.0
+            else:
+                temp = final_temp * (1.0 - progress)
+                
+        # Stop Condition for Extended
+        if phase == 1:
+            iters_since_improvement += 1
+            if current_std_dev <= 0.0001 and iters_since_improvement > 10000:
+                return (
+                    current_score, current_min_dist, current_std_dev, 
+                    best_score, best_min_dist, 
+                    iters_since_improvement, last_improvement_val, 
+                    True, i + 1 # Stop early, return iterations done
+                )
+
+        # Perturbation
+        idx_to_change = np.random.randint(0, n)
+        
+        # Save old state
+        old_color = colors_oklch[idx_to_change].copy()
+        old_oklab = colors_oklab[idx_to_change].copy()
+        # Save old distance row (only need one row as matrix is symmetric)
+        for k in range(n):
+            old_row[k] = dist_sq[idx_to_change, k]
+            
+        # Perturb
+        perturbation = np.array([
+            np.random.normal(0, 0.05),
+            np.random.normal(0, 0.05),
+            np.random.normal(0, 10.0)
+        ])
+        
+        colors_oklch[idx_to_change] += perturbation
+        
+        # Normalize/Constrain
+        colors_oklch[idx_to_change, 1] = np.abs(colors_oklch[idx_to_change, 1])
+        colors_oklch[idx_to_change, 2] = colors_oklch[idx_to_change, 2] % 360.0
+        
+        # Constrain to gamut (in-place)
+        # We need to call the function. Since it's JITed, it's fast.
+        # But constrain_to_gamut takes array. We pass slice.
+        # Numba slice passing is efficient.
+        colors_oklch[idx_to_change:idx_to_change+1] = constrain_to_gamut(colors_oklch[idx_to_change:idx_to_change+1])
+        
+        # Update OKLAB for this color
+        colors_oklab[idx_to_change] = oklch_to_oklab(colors_oklch[idx_to_change:idx_to_change+1])[0]
+        
+        # Incremental Distance Update
+        # Update row/col idx_to_change in dist_sq
+        for k in range(n):
+            if k == idx_to_change:
+                continue
+            
+            d = 0.0
+            for c in range(3):
+                diff = colors_oklab[idx_to_change, c] - colors_oklab[k, c]
+                d += diff * diff
+            
+            dist_sq[idx_to_change, k] = d
+            dist_sq[k, idx_to_change] = d
+            
+        # Recompute Metrics from dist_sq
+        # We can optimize this too, but scanning N*N is fast enough for N=32
+        min_dist = np.inf
+        min_dists = np.empty(n, dtype=np.float64)
+        
+        for r in range(n):
+            row_min = np.inf
+            for c in range(n):
+                if dist_sq[r, c] < row_min:
+                    row_min = dist_sq[r, c]
+            min_dists[r] = np.sqrt(row_min)
+            if min_dists[r] < min_dist:
+                min_dist = min_dists[r]
+                
+        std_dev = np.std(min_dists)
+        new_score = min_dist - 1.0 * std_dev
+        
+        # Acceptance
+        delta_score = new_score - current_score
+        
+        accept = False
+        if delta_score > 0:
+            accept = True
+        elif temp > 0:
+            if np.random.random() < np.exp(delta_score / temp):
+                accept = True
+                
+        if accept:
+            current_score = new_score
+            current_min_dist = min_dist
+            current_std_dev = std_dev
+            
+            if current_score > best_score:
+                best_score = current_score
+                best_colors[:] = colors_oklch[:] # Update best
+                best_min_dist = current_min_dist
+                
+            if phase == 1:
+                if current_min_dist > last_improvement_val + 0.0001:
+                    last_improvement_val = current_min_dist
+                    iters_since_improvement = 0
+        else:
+            # Revert
+            colors_oklch[idx_to_change] = old_color
+            colors_oklab[idx_to_change] = old_oklab
+            for k in range(n):
+                dist_sq[idx_to_change, k] = old_row[k]
+                dist_sq[k, idx_to_change] = old_row[k]
+                
+    return (
+        current_score, current_min_dist, current_std_dev, 
+        best_score, best_min_dist, 
+        iters_since_improvement, last_improvement_val, 
+        False, num_iters
+    )
+
 class ColorOptimizer:
-    def __init__(self, num_colors=27):
+    def __init__(self, num_colors=27, iterations=None, tsp_iterations=None):
         self.num_colors = num_colors
         self.rng = np.random.default_rng(42)
         
         # Simulated Annealing parameters
         self.initial_temp = 1.0
         self.final_temp = 0.0001
-        self.iterations = 100000000
-        self.state_file = "optimizer_state.pkl"
+        
+        # Intelligent iteration scaling
+        # Base: 27 colors -> 100M iterations
+        base_colors = 27
+        base_iterations = 100_000_000
+        
+        if iterations is not None:
+            self.iterations = int(iterations)
+        else:
+            # Scale quadratically with number of colors
+            scale_factor = (num_colors / base_colors) ** 2
+            self.iterations = int(base_iterations * scale_factor)
+            print(f"Auto-scaled iterations to {self.iterations:,} (Factor: {scale_factor:.2f}x)")
+
+        # Ensure results directory exists
+        os.makedirs("results", exist_ok=True)
+        self.state_file = os.path.join("results", f"optimizer_state_{num_colors}.pkl")
         self.start_iteration = 0
+        
+        # TSP parameters
+        base_tsp_iterations = 100_000
+        if tsp_iterations is not None:
+            self.tsp_iterations = int(tsp_iterations)
+        else:
+             # Scale quadratically for TSP as well
+            scale_factor = (num_colors / base_colors) ** 2
+            self.tsp_iterations = int(base_tsp_iterations * scale_factor)
+            print(f"Auto-scaled TSP iterations to {self.tsp_iterations:,}")
         
         # Initialize random colors in OKLCH
         self.colors_oklch = np.zeros((num_colors, 3))
@@ -228,9 +410,9 @@ class ColorOptimizer:
     def calculate_score(self, min_dist, std_dev):
         return calculate_score(min_dist, std_dev)
 
-    def save_state(self, iteration, current_score, current_min_dist, current_std_dev, best_score, best_colors):
+    def save_state(self, iteration, current_score, current_min_dist, current_std_dev, best_score, best_colors, best_min_dist, ext_iter=0, iters_since_improvement=0, last_improvement_val=0.0):
         """Save the current state to a file."""
-        print(f"\nSaving state at iteration {iteration}...")
+        print(f"\nSaving state at iteration {iteration} (Ext: {ext_iter})...")
         state = {
             'iteration': iteration,
             'colors_oklch': self.colors_oklch,
@@ -239,7 +421,11 @@ class ColorOptimizer:
             'current_std_dev': current_std_dev,
             'best_score': best_score,
             'best_colors': best_colors,
-            'rng_state': self.rng.bit_generator.state
+            'best_min_dist': best_min_dist,
+            'rng_state': self.rng.bit_generator.state,
+            'ext_iter': ext_iter,
+            'iters_since_improvement': iters_since_improvement,
+            'last_improvement_val': last_improvement_val
         }
         with open(self.state_file, 'wb') as f:
             pickle.dump(state, f)
@@ -257,7 +443,12 @@ class ColorOptimizer:
                 self.colors_oklch = state['colors_oklch']
                 self.rng.bit_generator.state = state['rng_state']
                 
-                print(f"Resuming from iteration {self.start_iteration}")
+                # Load extended phase state if available
+                self.ext_iter_start = state.get('ext_iter', 0)
+                self.iters_since_improvement_start = state.get('iters_since_improvement', 0)
+                self.last_improvement_val_start = state.get('last_improvement_val', 0.0)
+                
+                print(f"Resuming from iteration {self.start_iteration} (Ext: {self.ext_iter_start})")
                 return True, state
             except Exception as e:
                 print(f"Failed to load state: {e}")
@@ -276,6 +467,7 @@ class ColorOptimizer:
             current_std_dev = state['current_std_dev']
             best_score = state['best_score']
             best_colors = state['best_colors']
+            best_min_dist = state.get('best_min_dist', current_min_dist) # Fallback for old states
         else:
             # Ensure valid start
             self.colors_oklch = self.constrain_to_gamut(self.colors_oklch)
@@ -285,77 +477,140 @@ class ColorOptimizer:
             
             best_score = current_score
             best_colors = self.colors_oklch.copy()
+            best_min_dist = current_min_dist
+        
+        print(f"Initial: MinDist={current_min_dist:.4f}, StdDev={current_std_dev:.4f}, Score={current_score:.4f}")
         
         print(f"Initial: MinDist={current_min_dist:.4f}, StdDev={current_std_dev:.4f}, Score={current_score:.4f}")
         
         start_time = time.time()
+        last_print_time = start_time
+        
+        # Initialize extended phase variables for signal handler scope
+        ext_iter = getattr(self, 'ext_iter_start', 0)
+        iters_since_improvement = getattr(self, 'iters_since_improvement_start', 0)
+        last_improvement_val = getattr(self, 'last_improvement_val_start', best_min_dist)
         
         # Handle graceful shutdown
         def signal_handler(sig, frame):
             print("\nInterrupted! Saving state...")
-            self.save_state(i, current_score, current_min_dist, current_std_dev, best_score, best_colors)
+            # Use 'i' from loop if running, else start_iteration
+            current_iter = i if 'i' in locals() else self.start_iteration
+            self.save_state(current_iter, current_score, current_min_dist, current_std_dev, best_score, best_colors, best_min_dist, ext_iter, iters_since_improvement, last_improvement_val)
             sys.exit(0)
             
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
+        # Initialize OKLAB and Distance Matrix for Numba
+        self.colors_oklab = self.oklch_to_oklab(self.colors_oklch)
+        
+        # Calculate initial distance matrix
+        n = self.num_colors
+        self.dist_sq = np.empty((n, n), dtype=np.float64)
+        for i in range(n):
+            for j in range(n):
+                d = 0.0
+                for k in range(3):
+                    diff = self.colors_oklab[i, k] - self.colors_oklab[j, k]
+                    d += diff * diff
+                self.dist_sq[i, j] = d
+            self.dist_sq[i, i] = np.inf
+
         try:
-            for i in range(self.start_iteration, self.iterations):
-                temp = self.initial_temp * ((self.final_temp / self.initial_temp) ** (i / self.iterations))
+            # --- Main Optimization Phase ---
+            chunk_size = 10000
+            
+            # Seed Numba RNG
+            seed = self.rng.integers(0, 1000000)
+            
+            for i in range(self.start_iteration, self.iterations, chunk_size):
+                iters_to_run = min(chunk_size, self.iterations - i)
                 
-                candidate_colors = self.colors_oklch.copy()
-                idx_to_change = self.rng.integers(0, self.num_colors)
+                (current_score, current_min_dist, current_std_dev, 
+                 best_score, best_min_dist, _, _, _, _) = run_batch_optimization(
+                    self.colors_oklch, self.colors_oklab, self.dist_sq,
+                    i, iters_to_run, self.iterations,
+                    self.initial_temp, self.final_temp, 0, # Phase 0
+                    current_score, current_min_dist, current_std_dev,
+                    best_score, best_colors, best_min_dist,
+                    seed + i # Vary seed slightly
+                )
                 
-                perturbation = np.array([
-                    self.rng.normal(0, 0.05),
-                    self.rng.normal(0, 0.05),
-                    self.rng.normal(0, 10.0)
-                ])
-                
-                candidate_colors[idx_to_change] += perturbation
-                
-                # Normalize Hue and ensure positive Chroma
-                candidate_colors[idx_to_change, 1] = np.abs(candidate_colors[idx_to_change, 1])
-                candidate_colors[idx_to_change, 2] = candidate_colors[idx_to_change, 2] % 360.0
-                
-                candidate_colors[idx_to_change:idx_to_change+1] = self.constrain_to_gamut(candidate_colors[idx_to_change:idx_to_change+1])
-                
-                new_min_dist, new_std_dev = self.calculate_metrics(candidate_colors)
-                new_score = self.calculate_score(new_min_dist, new_std_dev)
-                
-                # Maximize Score
-                delta_score = new_score - current_score
-                
-                if delta_score > 0 or self.rng.random() < np.exp(delta_score / temp):
-                    self.colors_oklch = candidate_colors
-                    current_score = new_score
-                    current_min_dist = new_min_dist
-                    current_std_dev = new_std_dev
+                # Update progress
+                current_iter = i + iters_to_run
+                current_time = time.time()
+                if current_time - last_print_time > 2.0:
+                    last_print_time = current_time
+                    elapsed_time = current_time - start_time
+                    temp = self.initial_temp * ((self.final_temp / self.initial_temp) ** (current_iter / self.iterations))
                     
-                    if current_score > best_score:
-                        best_score = current_score
-                        best_colors = self.colors_oklch.copy()
-                
-                if i % 10000 == 0:
-                    elapsed_time = time.time() - start_time
-                    if i > self.start_iteration:
-                        iterations_per_sec = (i - self.start_iteration) / elapsed_time
-                        remaining_iterations = self.iterations - i
+                    if current_iter > self.start_iteration:
+                        iterations_per_sec = (current_iter - self.start_iteration) / elapsed_time
+                        remaining_iterations = self.iterations - current_iter
                         eta_seconds = remaining_iterations / iterations_per_sec if iterations_per_sec > 0 else 0
                         eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
                     else:
                         eta_str = "Calculating..."
                     
-                    progress = (i / self.iterations) * 100
-                    print(f"Iter {i}/{self.iterations} ({progress:.1f}%): Temp={temp:.4f}, Score={current_score:.4f} (Min={current_min_dist:.4f}, Std={current_std_dev:.4f}) ETA: {eta_str}")
+                    progress = (current_iter / self.iterations) * 100
+                    print(f"Iter {current_iter}/{self.iterations} ({progress:.1f}%): Temp={temp:.4f}, Score={current_score:.4f} (Min={current_min_dist:.4f}, Std={current_std_dev:.4f}) ETA: {eta_str}")
+
+            # --- Extended Optimization Phase ---
+            print("\nEntering Extended Optimization Phase (Refining)...")
+            print("Target: StdDev <= 0.0001 AND MinDist improvement < 0.0001 over 10k iters")
+            
+            max_ext_iters = self.iterations
+            print(f"Extended Phase Limit: {max_ext_iters:,} iterations")
+            
+            if ext_iter == 0:
+                last_improvement_val = best_min_dist
+                
+            while ext_iter < max_ext_iters:
+                iters_to_run = min(chunk_size, max_ext_iters - ext_iter)
+                
+                (current_score, current_min_dist, current_std_dev, 
+                 best_score, best_min_dist, 
+                 iters_since_improvement, last_improvement_val, 
+                 stop_early, iters_done) = run_batch_optimization(
+                    self.colors_oklch, self.colors_oklab, self.dist_sq,
+                    ext_iter + 1, iters_to_run, 0, # total_iters ignored in phase 1
+                    0, self.final_temp, 1, # Phase 1
+                    current_score, current_min_dist, current_std_dev,
+                    best_score, best_colors, best_min_dist,
+                    seed + ext_iter + 1000000,
+                    ext_iter_offset=0,
+                    max_ext_iters=max_ext_iters,
+                    iters_since_improvement=iters_since_improvement,
+                    last_improvement_val=last_improvement_val
+                )
+                
+                ext_iter += iters_done
+                
+                if stop_early:
+                    print(f"\nExtended Phase Complete: Reached target StdDev ({current_std_dev:.6f}) AND MinDist plateaued.")
+                    break
+                    
+                current_time = time.time()
+                if current_time - last_print_time > 2.0:
+                    last_print_time = current_time
+                    # Calculate temp for display
+                    progress = ext_iter / max_ext_iters
+                    if progress >= 1.0:
+                        disp_temp = 0.0
+                    else:
+                        disp_temp = self.final_temp * (1.0 - progress)
+                    print(f"Ext Iter {ext_iter}: Temp={disp_temp:.4f}, Score={current_score:.4f} (Min={current_min_dist:.4f}, Std={current_std_dev:.4f})")
 
         except KeyboardInterrupt:
             print("\nKeyboardInterrupt caught. Saving state...")
-            self.save_state(i, current_score, current_min_dist, current_std_dev, best_score, best_colors)
+            current_iter = i if 'i' in locals() else self.start_iteration
+            self.save_state(current_iter, current_score, current_min_dist, current_std_dev, best_score, best_colors, best_min_dist, ext_iter, iters_since_improvement, last_improvement_val)
             sys.exit(0)
         except Exception as e:
             print(f"\nAn error occurred: {e}")
-            self.save_state(i, current_score, current_min_dist, current_std_dev, best_score, best_colors)
+            current_iter = i if 'i' in locals() else self.start_iteration
+            self.save_state(current_iter, current_score, current_min_dist, current_std_dev, best_score, best_colors, best_min_dist, ext_iter, iters_since_improvement, last_improvement_val)
             raise e
 
         # Cleanup state file on success
@@ -364,10 +619,16 @@ class ColorOptimizer:
             print("Optimization finished. State file removed.")
 
         self.colors_oklch = best_colors
+        self.ext_iterations = ext_iter
+        self.total_iterations = self.iterations + ext_iter
+        print(f"Final Best Score: {best_score:.4f}")
         print(f"Final Best Score: {best_score:.4f}")
         
         # Post-processing: TSP Sort
         self.sort_colors_tsp()
+        
+        # Post-processing: Canonicalize Order
+        self.canonicalize_order()
 
     def sort_colors_tsp(self):
         print("Sorting colors to minimize ring distance (TSP)...")
@@ -393,7 +654,7 @@ class ColorOptimizer:
         best_order = current_order.copy()
         
         # Simple Simulated Annealing for TSP
-        tsp_iterations = 10000
+        tsp_iterations = self.tsp_iterations
         tsp_temp = 1.0
         
         for i in range(tsp_iterations):
@@ -421,11 +682,67 @@ class ColorOptimizer:
         print(f"TSP Sorted. Ring Distance Reduced: {best_dist:.4f}")
         self.colors_oklch = self.colors_oklch[best_order]
 
+    def canonicalize_order(self):
+        print("Canonicalizing color order...")
+        # 1. Base: black (or lowest L color) is index 0
+        l_values = self.colors_oklch[:, 0]
+        min_l_idx = np.argmin(l_values)
+        
+        # Rotate so min_l_idx is at 0
+        self.colors_oklch = np.roll(self.colors_oklch, -min_l_idx, axis=0)
+        
+        # 2. Direction: after black, color change should be ascending order in hue.
+        # Calculate H_w = H*sqrt(L*C)
+        h = self.colors_oklch[:, 2]
+        l = self.colors_oklch[:, 0]
+        c = self.colors_oklch[:, 1]
+        
+        # Ensure H is positive for calculation (it should be from 0-360)
+        h = h % 360.0
+        
+        # Use distance from 0.5 for lightness weight
+        l_weight = 0.5 - np.abs(l - 0.5)
+        h_w = h * np.sqrt(l_weight * c)
+        
+        # We consider the sequence after the first element (index 0)
+        # Sequence indices: 1 to N-1
+        n = self.num_colors
+        if n <= 2:
+            return # Nothing to order direction-wise
+            
+        # Split into two halves
+        # If N=27, remaining is 26. Half is 13.
+        # First half: 1 to 13. Second half: 14 to 26.
+        num_remaining = n - 1
+        half_size = num_remaining // 2
+        
+        first_half_sum = np.sum(h_w[1 : 1 + half_size])
+        second_half_sum = np.sum(h_w[1 + half_size :])
+        
+        print(f"Direction Check: First Half Sum = {first_half_sum:.4f}, Second Half Sum = {second_half_sum:.4f}")
+        
+        # Choose the direction where the sum H_w of first half is less than second half
+        if first_half_sum > second_half_sum:
+            print("Reversing direction to satisfy canonical order...")
+            # Reverse elements from 1 to end
+            self.colors_oklch[1:] = self.colors_oklch[1:][::-1]
+            
+            # Re-verify (optional, for debug)
+            # h_new = self.colors_oklch[:, 2] % 360.0
+            # l_new = self.colors_oklch[:, 0]
+            # c_new = self.colors_oklch[:, 1]
+            # h_w_new = h_new * np.sqrt(l_new * c_new)
+            # s1 = np.sum(h_w_new[1 : 1 + half_size])
+            # s2 = np.sum(h_w_new[1 + half_size :])
+            # print(f"New sums: {s1:.4f} vs {s2:.4f}")
+        else:
+            print("Direction is already canonical.")
+
     def get_results(self):
         oklab = self.oklch_to_oklab(self.colors_oklch)
         linear = self.oklab_to_linear_srgb(oklab)
         srgb = self.linear_srgb_to_srgb(linear)
-        srgb_8bit = np.clip(srgb * 255, 0, 255).astype(int)
+        srgb_8bit = np.clip(np.round(srgb * 255), 0, 255).astype(int)
         
         return self.colors_oklch, srgb_8bit
 
@@ -433,35 +750,53 @@ class ColorOptimizer:
         min_dist, std_dev = self.calculate_metrics(self.colors_oklch)
         
         print("\n--- Statistics ---")
-        print(f"Minimum Distance: {min_dist:.4f}")
-        print(f"Std Dev of NN Distances: {std_dev:.4f}")
+        print(f"Minimum Distance: {min_dist:.5f}")
+        print(f"Std Dev of NN Distances: {std_dev:.5f}")
 
 if __name__ == "__main__":
-    opt = ColorOptimizer(num_colors=27)
-    opt.optimize()
+    parser = argparse.ArgumentParser(description="Optimize colors in OKLCH space.")
+    parser.add_argument("-n", "--num_colors", type=int, required=True, help="Number of colors to optimize")
+    parser.add_argument("--iterations", type=int, help="Number of SA iterations (default: auto-scaled)")
+    parser.add_argument("--tsp_iterations", type=int, help="Number of TSP iterations (default: auto-scaled)")
     
-    oklch, srgb = opt.get_results()
-    # opt.print_stats() # Removed in favor of manual formatting below
+    args = parser.parse_args()
     
-    # Calculate stats manually for output
-    min_dist, std_dev = opt.calculate_metrics(oklch)
-    
-    output_lines = []
-    output_lines.append("\n--- Statistics ---")
-    output_lines.append(f"Minimum Distance: {min_dist:.4f}")
-    output_lines.append(f"Std Dev of NN Distances: {std_dev:.4f}")
-    
-    output_lines.append("\n--- Final Colors ---")
-    output_lines.append(f"{'Index':<6} {'Hex':<8} {'R,G,B':<12} {'L':<6} {'C':<6} {'H':<6}")
-    for i in range(len(srgb)):
-        r, g, b = srgb[i]
-        l, c, h = oklch[i]
-        hex_code = f"#{r:02x}{g:02x}{b:02x}"
-        output_lines.append(f"{i:<6} {hex_code:<8} {r},{g},{b:<8} {l:.3f} {c:.3f} {h:.1f}")
-    
-    output_str = "\n".join(output_lines)
-    print(output_str)
-    
-    with open("colors.txt", "w") as f:
-        f.write(output_str)
-    print("\nResults saved to colors.txt")
+    try:
+        opt = ColorOptimizer(num_colors=args.num_colors, iterations=args.iterations, tsp_iterations=args.tsp_iterations)
+        opt.optimize()
+        
+        oklch, srgb = opt.get_results()
+        # opt.print_stats() # Removed in favor of manual formatting below
+        
+        # Calculate stats manually for output
+        min_dist, std_dev = opt.calculate_metrics(oklch)
+        
+        output_lines = []
+        output_lines.append("--- Iterations ---")
+        output_lines.append(f"Total Iterations: {opt.total_iterations:,}")
+        output_lines.append(f"Ext Iterations: {opt.ext_iterations:,}")
+        output_lines.append(f"TSP Iterations: {opt.tsp_iterations:,}")
+
+        output_lines.append("\n--- Statistics ---")
+        output_lines.append(f"Minimum Distance: {min_dist:.5f}")
+        output_lines.append(f"Std Dev of NN Distances: {std_dev:.5f}")
+        
+        output_lines.append("\n--- Final Colors ---")
+        output_lines.append(f"{'Index':<6} {'Hex':<8} {'R,G,B':<14} {'L':<8} {'C':<8} {'H':<8}".rstrip())
+        for i in range(len(srgb)):
+            r, g, b = srgb[i]
+            l, c, h = oklch[i]
+            hex_code = f"#{r:02x}{g:02x}{b:02x}"
+            rgb_str = f"{r},{g},{b}"
+            output_lines.append(f"{i:<6} {hex_code:<8} {rgb_str:<14} {l:<8.3f} {c:<8.3f} {h:<8.1f}".rstrip())
+        
+        output_str = "\n".join(output_lines)
+        print(output_str)
+        
+        filename = os.path.join("results", f"colors_{args.num_colors}.txt")
+        with open(filename, "w") as f:
+            f.write(output_str)
+        print(f"\nResults saved to {filename}")
+    except KeyboardInterrupt:
+        print("\nOptimization cancelled by user.")
+        sys.exit(0)
