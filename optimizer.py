@@ -518,13 +518,44 @@ class ColorOptimizer:
         # Handle graceful shutdown
         def signal_handler(sig, frame):
             print("\nInterrupted! Saving state...")
-            # Use 'i' from loop if running, else start_iteration
-            current_iter = i if 'i' in locals() else self.start_iteration
+            try:
+                current_iter = i
+            except NameError:
+                current_iter = self.start_iteration
+            
             self.save_state(current_iter, current_score, current_min_dist, current_std_dev, best_score, best_colors, best_min_dist, ext_iter, iters_since_improvement, last_improvement_val)
             sys.exit(0)
             
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
+
+        # Windows Console Control Handler
+        if sys.platform == 'win32':
+            import ctypes
+            from ctypes import wintypes
+            
+            def console_ctrl_handler(ctrl_type):
+                # CTRL_C_EVENT = 0
+                # CTRL_BREAK_EVENT = 1
+                # CTRL_CLOSE_EVENT = 2
+                if ctrl_type in (0, 1, 2):
+                    print(f"\nConsole event {ctrl_type} received. Saving state...")
+                    try:
+                        try:
+                            current_iter = i
+                        except NameError:
+                            current_iter = self.start_iteration
+                            
+                        self.save_state(current_iter, current_score, current_min_dist, current_std_dev, best_score, best_colors, best_min_dist, ext_iter, iters_since_improvement, last_improvement_val)
+                        return True # Indicate we handled it
+                    except Exception as e:
+                        print(f"Error in console handler: {e}")
+                        return False
+                return False
+            
+            # Keep reference to avoid GC
+            self._ctrl_handler = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)(console_ctrl_handler)
+            ctypes.windll.kernel32.SetConsoleCtrlHandler(self._ctrl_handler, True)
 
         # Initialize OKLAB and Distance Matrix for Numba
         self.colors_oklab = self.oklch_to_oklab(self.colors_oklch)

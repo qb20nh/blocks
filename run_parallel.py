@@ -99,64 +99,73 @@ def run_optimizer(n):
             errors='replace'
         )
         
-        for line in process.stdout:
-            line = line.strip()
-            if line:
-                if "Ext Iter" in line:
-                    try:
-                        # Example: Ext Iter 1: Temp=..., Score=... (Min=..., Std=...)
-                        # Shorten to: Ext 1: Score=...
-                        parts = line.split(":")
-                        if len(parts) > 1:
-                             # Try to extract score
-                             score_part = line.split("Score=")[1].split("(")[0].strip()
-                             queue.put((n, f"Ext {parts[0].split(' ')[2]}: Score={score_part}"))
-                        else:
-                            queue.put((n, "Ext Refining..."))
-                    except:
-                        queue.put((n, line))
-                elif "Iter" in line:
-                    try:
-                        # Extract progress info to keep it short
-                        # Example: Iter 100/1000 (10.0%): Temp=..., Score=... ETA: ...
-                        parts = line.split("):")
-                        if len(parts) > 1:
-                            # Parse speed if present
-                            if "Speed=" in line:
-                                try:
-                                    speed_str = line.split("Speed=")[1].split("it/s")[0].strip()
-                                    speed = float(speed_str)
-                                    queue.put(('SPEED', n, speed))
-                                except:
-                                    pass
-                            
-                            # Clean up line for display
-                            display_line = parts[0] + ") " + parts[1].split("ETA:")[1].strip() if "ETA:" in parts[1] else line
-                            # Remove Speed=... from display line if present to keep it short
-                            if "Speed=" in display_line:
-                                pre_speed = display_line.split("Speed=")[0].strip()
-                                post_speed = display_line.split("it/s")[1].strip() if "it/s" in display_line else ""
-                                display_line = f"{pre_speed} {post_speed}".strip()
-                                
-                            queue.put((n, display_line))
-                        else:
+        try:
+            for line in process.stdout:
+                line = line.strip()
+                if line:
+                    if "Ext Iter" in line:
+                        try:
+                            # Example: Ext Iter 1: Temp=..., Score=... (Min=..., Std=...)
+                            # Shorten to: Ext 1: Score=...
+                            parts = line.split(":")
+                            if len(parts) > 1:
+                                 # Try to extract score
+                                 score_part = line.split("Score=")[1].split("(")[0].strip()
+                                 queue.put((n, f"Ext {parts[0].split(' ')[2]}: Score={score_part}"))
+                            else:
+                                queue.put((n, "Ext Refining..."))
+                        except:
                             queue.put((n, line))
-                    except:
-                        queue.put((n, line))
-                elif "Extended Phase Complete" in line:
-                    queue.put((n, "Ext Phase Done"))
-                elif "Final" in line:
-                    queue.put((n, "Finalizing..."))
-                elif "Sorting colors" in line:
-                    queue.put((n, "TSP Sorting..."))
-                elif "Force fresh start" in line:
-                    queue.put((n, "Cleaning..."))
-                elif "Resuming" in line:
-                    queue.put((n, "Resuming..."))
-                elif "Optimizing" in line and "colors" in line:
-                    queue.put((n, "Initializing..."))
-        
-        process.wait()
+                    elif "Iter" in line:
+                        try:
+                            # Extract progress info to keep it short
+                            # Example: Iter 100/1000 (10.0%): Temp=..., Score=... ETA: ...
+                            parts = line.split("):")
+                            if len(parts) > 1:
+                                # Parse speed if present
+                                if "Speed=" in line:
+                                    try:
+                                        speed_str = line.split("Speed=")[1].split("it/s")[0].strip()
+                                        speed = float(speed_str)
+                                        queue.put(('SPEED', n, speed))
+                                    except:
+                                        pass
+                                
+                                # Clean up line for display
+                                display_line = parts[0] + ") " + parts[1].split("ETA:")[1].strip() if "ETA:" in parts[1] else line
+                                # Remove Speed=... from display line if present to keep it short
+                                if "Speed=" in display_line:
+                                    pre_speed = display_line.split("Speed=")[0].strip()
+                                    post_speed = display_line.split("it/s")[1].strip() if "it/s" in display_line else ""
+                                    display_line = f"{pre_speed} {post_speed}".strip()
+                                    
+                                queue.put((n, display_line))
+                            else:
+                                queue.put((n, line))
+                        except:
+                            queue.put((n, line))
+                    elif "Extended Phase Complete" in line:
+                        queue.put((n, "Ext Phase Done"))
+                    elif "Final" in line:
+                        queue.put((n, "Finalizing..."))
+                    elif "Sorting colors" in line:
+                        queue.put((n, "TSP Sorting..."))
+                    elif "Force fresh start" in line:
+                        queue.put((n, "Cleaning..."))
+                    elif "Resuming" in line:
+                        queue.put((n, "Resuming..."))
+                    elif "Optimizing" in line and "colors" in line:
+                        queue.put((n, "Initializing..."))
+            
+            process.wait()
+            
+        except KeyboardInterrupt:
+            # On interrupt, we want to wait for the child to finish saving
+            queue.put((n, "Stopping (Saving)..."))
+            # The child process should also receive the signal and start saving.
+            # We just wait for it to exit.
+            process.wait()
+            return n, False, "Interrupted"
         
         if process.returncode != 0:
             # Capture remaining output
@@ -332,12 +341,42 @@ def main():
     
     priority_val = PRIORITY_MAP[args.priority]
     
+    # Windows Console Control Handler for Main Process
+    if sys.platform == 'win32':
+        import ctypes
+        def console_ctrl_handler(ctrl_type):
+            if ctrl_type == 2: # CTRL_CLOSE_EVENT
+                print("\nMain process received CTRL_CLOSE_EVENT. Waiting for workers...")
+                # We return True to tell Windows "we are handling this, don't kill us yet".
+                # This gives us some time (usually 5 seconds) before forced termination.
+                # The workers should also receive this event and start saving.
+                # We just need to stay alive long enough for them to finish.
+                time.sleep(3) # Wait a bit to ensure workers have CPU time
+                return True
+            return False
+            
+        _ctrl_handler = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)(console_ctrl_handler)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(_ctrl_handler, True)
+
     try:
         with prevent_sleep():
             # Use initializer to pass queue to workers
             with multiprocessing.Pool(processes=args.threads, initializer=init_worker, initargs=(queue, priority_val, args.force)) as pool:
-                # Map just the numbers, worker uses global queue
-                results = pool.map(run_optimizer, nums)
+                try:
+                    # Map just the numbers, worker uses global queue
+                    results = pool.map(run_optimizer, nums)
+                except KeyboardInterrupt:
+                    print("\nMain process interrupted. Waiting for workers to save state...")
+                    # We do NOT want to terminate the pool immediately.
+                    # The workers will catch the interrupt and finish saving.
+                    # We just need to wait for them to exit.
+                    # pool.__exit__ will call terminate() if an exception propagates out of the with block?
+                    # Actually, if we catch it here, we exit the inner try.
+                    # Then we exit the 'with pool' block.
+                    # The 'with pool' block calls pool.terminate() if an exception occurred, or pool.join() if not?
+                    # Wait, standard multiprocessing.Pool context manager calls terminate() on exception.
+                    # So we must NOT let the exception propagate out of the 'with' block if we want to wait.
+                    pass
     finally:
         stop_event.set()
         display_thread.join()
