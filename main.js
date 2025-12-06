@@ -68,7 +68,7 @@ perspectiveCamera.position.set(-7, 10, 10);
 
 // 2. Setup Orthographic Camera
 const aspect = window.innerWidth / window.innerHeight;
-const frustumSize = 12.5; 
+const frustumSize = 12.5;
 const orthoCamera = new THREE.OrthographicCamera(
     frustumSize * aspect / -2,
     frustumSize * aspect / 2,
@@ -115,11 +115,12 @@ scene.add(pointLight2);
 
 // --- Geometry Processing ---
 const colorPalette = [
-    "#009997", "#64c1fe", "#2e7bfe", "#8800f8", "#1008fd", "#2b008e", 
-    "#010036", "#000000", "#450011", "#003900", "#027100", "#005879", 
-    "#7b006b", "#93618e", "#a87b00", "#793e00", "#d70003", "#fe7879", 
-    "#eb00a1", "#c073fe", "#feb2fc", "#fefefe", "#3afeda", "#ccc068", 
-    "#f9fd2c", "#04fd00", "#3cb900"
+    "#000000", "#003002", "#6e3f00", "#005a7f", "#007709",
+    "#009d9e", "#1cb501", "#01fc52", "#fffe02", "#b8c77a",
+    "#ffe8f9", "#11fffa", "#8cbbff", "#fc8aff", "#ff8576",
+    "#a78100", "#cd2200", "#ff0094", "#d507ff", "#7b00d4",
+    "#0400fc", "#4976ff", "#a26a9e", "#910065", "#490026",
+    "#340089", "#010038"
 ];
 
 const dimZ = layers.length;
@@ -158,12 +159,12 @@ function getVal(x, y, z) {
  */
 function getNeighbors(v) {
     return [
-        {x: v.x+1, y: v.y, z: v.z},
-        {x: v.x-1, y: v.y, z: v.z},
-        {x: v.x, y: v.y+1, z: v.z},
-        {x: v.x, y: v.y-1, z: v.z},
-        {x: v.x, y: v.y, z: v.z+1},
-        {x: v.x, y: v.y, z: v.z-1},
+        { x: v.x + 1, y: v.y, z: v.z },
+        { x: v.x - 1, y: v.y, z: v.z },
+        { x: v.x, y: v.y + 1, z: v.z },
+        { x: v.x, y: v.y - 1, z: v.z },
+        { x: v.x, y: v.y, z: v.z + 1 },
+        { x: v.x, y: v.y, z: v.z - 1 },
     ];
 }
 
@@ -183,16 +184,16 @@ function isScrewTetracube(voxels) {
             const dx = voxels[i].x - voxels[j].x;
             const dy = voxels[i].y - voxels[j].y;
             const dz = voxels[i].z - voxels[j].z;
-            dists.push(dx*dx + dy*dy + dz*dz);
+            dists.push(dx * dx + dy * dy + dz * dz);
         }
     }
-    dists.sort((a,b) => a - b);
-    
+    dists.sort((a, b) => a - b);
+
     // Expected squared distances for a screw tetracube:
     // 3 edges (dist^2=1), 2 face diagonals (dist^2=2), 1 body diagonal (dist^2=3)
     const expected = [1, 1, 1, 2, 2, 3];
-    for(let i=0; i<6; i++) {
-        if(dists[i] !== expected[i]) return false;
+    for (let i = 0; i < 6; i++) {
+        if (dists[i] !== expected[i]) return false;
     }
     return true;
 }
@@ -205,21 +206,21 @@ function isScrewTetracube(voxels) {
  */
 function partitionIntoScrews(voxels) {
     if (voxels.length === 0) return [];
-    
+
     // Pick the first voxel and try to find 3 others to form a screw
     const first = voxels[0];
     const others = voxels.slice(1);
-    
+
     // We need to choose 3 from 'others'
     const combinations = getCombinations(others, 3);
-    
+
     for (let combo of combinations) {
         const candidate = [first, ...combo];
         if (isScrewTetracube(candidate)) {
             // If valid screw, try to partition the remaining voxels
             const candidateKeys = new Set(candidate.map(v => getKey(v.x, v.y, v.z)));
-            const remaining = others.filter(v => !candidateKeys.has(getKey(v.x, v.y, v.z))); 
-            
+            const remaining = others.filter(v => !candidateKeys.has(getKey(v.x, v.y, v.z)));
+
             const res = partitionIntoScrews(remaining);
             if (res !== null) {
                 return [candidate, ...res];
@@ -251,7 +252,7 @@ function getCombinations(arr, k) {
 // Identify connected components (blobs) of same-ID voxels.
 // If a blob is larger than 4 voxels (e.g. 8 or 12), partition it into multiple screw tetracubes.
 const visited = new Set();
-let finalPieces = []; 
+let finalPieces = [];
 let nextIdOffset = 10; // Offset to distinguish split pieces from original IDs
 
 for (let z = 0; z < dimZ; z++) {
@@ -259,14 +260,14 @@ for (let z = 0; z < dimZ; z++) {
         for (let x = 0; x < dimX; x++) {
             const key = getKey(x, y, z);
             const val = getVal(x, y, z);
-            
+
             // Start BFS for a new unvisited piece
             if (val !== null && !visited.has(key)) {
                 const blobVoxels = [];
-                const queue = [{x, y, z}];
+                const queue = [{ x, y, z }];
                 visited.add(key);
-                
-                while(queue.length > 0) {
+
+                while (queue.length > 0) {
                     const current = queue.shift();
                     blobVoxels.push(current);
                     const neighbors = getNeighbors(current);
@@ -281,7 +282,7 @@ for (let z = 0; z < dimZ; z++) {
                         }
                     }
                 }
-                
+
                 // Process the found blob
                 if (blobVoxels.length === 4) {
                     finalPieces.push({ id: val, voxels: blobVoxels });
@@ -298,8 +299,8 @@ for (let z = 0; z < dimZ; z++) {
                         finalPieces.push({ id: val, voxels: blobVoxels });
                     }
                 } else {
-                        // Invalid size (not multiple of 4), keep as is
-                        finalPieces.push({ id: val, voxels: blobVoxels });
+                    // Invalid size (not multiple of 4), keep as is
+                    finalPieces.push({ id: val, voxels: blobVoxels });
                 }
             }
         }
@@ -336,7 +337,7 @@ for (let y = 0; y < dimY; y++) {
         // Add dependencies: lower piece supports upper piece
         for (let i = 0; i < columnVoxels.length - 1; i++) {
             const bottom = columnVoxels[i].pIdx;
-            const top = columnVoxels[i+1].pIdx;
+            const top = columnVoxels[i + 1].pIdx;
             if (bottom !== top) {
                 if (!adjList[bottom].includes(top)) {
                     adjList[bottom].push(top);
@@ -354,22 +355,22 @@ const queue = [];
 inDegree.forEach((deg, idx) => { if (deg === 0) queue.push(idx); });
 
 // Heuristic: Sort the queue by lowest Z coordinate to build from bottom up visually
-queue.sort((a,b) => {
+queue.sort((a, b) => {
+    const minZA = Math.min(...finalPieces[a].voxels.map(v => v.z));
+    const minZB = Math.min(...finalPieces[b].voxels.map(v => v.z));
+    return minZA - minZB;
+});
+
+while (queue.length > 0) {
+    // Re-sort queue to maintain bottom-up visual order among available pieces
+    queue.sort((a, b) => {
         const minZA = Math.min(...finalPieces[a].voxels.map(v => v.z));
         const minZB = Math.min(...finalPieces[b].voxels.map(v => v.z));
         return minZA - minZB;
-});
-
-while(queue.length > 0) {
-    // Re-sort queue to maintain bottom-up visual order among available pieces
-    queue.sort((a,b) => {
-            const minZA = Math.min(...finalPieces[a].voxels.map(v => v.z));
-            const minZB = Math.min(...finalPieces[b].voxels.map(v => v.z));
-            return minZA - minZB;
     });
     const u = queue.shift();
     sortedIndices.push(u);
-    
+
     // Remove dependencies
     adjList[u].forEach(v => {
         inDegree[v]--;
@@ -382,8 +383,8 @@ while(queue.length > 0) {
 if (sortedIndices.length < finalPieces.length) {
     const used = new Set(sortedIndices);
     const remaining = [];
-    for(let i=0; i<finalPieces.length; i++) if(!used.has(i)) remaining.push(i);
-    remaining.sort((a,b) => {
+    for (let i = 0; i < finalPieces.length; i++) if (!used.has(i)) remaining.push(i);
+    remaining.sort((a, b) => {
         const minZA = Math.min(...finalPieces[a].voxels.map(v => v.z));
         const minZB = Math.min(...finalPieces[b].voxels.map(v => v.z));
         return minZA - minZB;
@@ -403,11 +404,11 @@ sortedPieces.forEach(p => totalVoxels += p.voxels.length);
 
 // Create Instanced Meshes
 // Material for the main block (transparent when skeleton is ON)
-const cubeMat = new THREE.MeshStandardMaterial({ 
+const cubeMat = new THREE.MeshStandardMaterial({
     color: 0xffffff, // Will be overridden by instance color
-    transparent: true, 
+    transparent: true,
     opacity: 0.15,
-    depthWrite: false, 
+    depthWrite: false,
     side: THREE.DoubleSide
 });
 const cubeInstancedMesh = new THREE.InstancedMesh(boxGeo, cubeMat, totalVoxels);
@@ -431,7 +432,7 @@ sortedPieces.forEach((piece, idx) => {
     const colorIndex = (idx * 5) % 27;
     const colorHex = colorPalette[colorIndex];
     const color = new THREE.Color(colorHex);
-    
+
     const pieceGroup = new THREE.Group(); // Still used for lines and logical position
     const instanceStart = globalInstanceIdx;
     const instanceCount = piece.voxels.length;
@@ -441,9 +442,9 @@ sortedPieces.forEach((piece, idx) => {
         // Convert grid coordinates to world coordinates
         // Swap Y and Z for Three.js (Y is up)
         const px = v.x - offsetX;
-        const py = v.z - 2.5; 
-        const pz = v.y - offsetX; 
-        
+        const py = v.z - 2.5;
+        const pz = v.y - offsetX;
+
         voxelOffsets.push(new THREE.Vector3(px, py, pz));
 
         // Set Color
@@ -530,9 +531,9 @@ function resetAnimation() {
         p.group.position.y = 20;
         p.isLanded = false;
         p.isFalling = false;
-        
+
         // Hide instances
-        for(let i=0; i<p.instanceCount; i++) {
+        for (let i = 0; i < p.instanceCount; i++) {
             const idx = p.instanceStart + i;
             const off = p.voxelOffsets[i];
             dummy.position.copy(off);
@@ -552,9 +553,9 @@ function triggerNextBlock() {
         const p = animPieces[currentPieceIndex];
         p.group.visible = true;
         p.isFalling = true;
-        
+
         // Show instances (scale 1) at initial position
-        for(let i=0; i<p.instanceCount; i++) {
+        for (let i = 0; i < p.instanceCount; i++) {
             const idx = p.instanceStart + i;
             const off = p.voxelOffsets[i];
             dummy.position.set(off.x, off.y + p.group.position.y, off.z);
@@ -565,7 +566,7 @@ function triggerNextBlock() {
         }
         cubeInstancedMesh.instanceMatrix.needsUpdate = true;
         sphereInstancedMesh.instanceMatrix.needsUpdate = true;
-        
+
         currentPieceIndex++;
         updateUI();
     }
@@ -574,7 +575,7 @@ function triggerNextBlock() {
 // Toggle Projection Logic
 projBtn.addEventListener('click', () => {
     const prevCamera = activeCamera;
-    
+
     if (activeCamera === perspectiveCamera) {
         activeCamera = orthoCamera;
         projBtn.innerText = "View: Orthographic";
@@ -582,11 +583,11 @@ projBtn.addEventListener('click', () => {
         activeCamera = perspectiveCamera;
         projBtn.innerText = "View: Perspective";
     }
-    
+
     // Sync physical position and orientation (quaternion) to preserve the exact rotation
     activeCamera.position.copy(prevCamera.position);
     activeCamera.quaternion.copy(prevCamera.quaternion);
-    
+
     // Update controls to use new camera
     controls.object = activeCamera;
     // No manual lookAt() or update() needed here if copying quaternion; 
@@ -597,7 +598,7 @@ projBtn.addEventListener('click', () => {
 skelBtn.addEventListener('click', () => {
     isSkeletonVisible = !isSkeletonVisible;
     skelBtn.innerText = isSkeletonVisible ? "Skeleton: ON" : "Skeleton: OFF";
-    
+
     sunLight.castShadow = !isSkeletonVisible;
 
     // Toggle Instanced Meshes
@@ -639,21 +640,21 @@ function animate() {
     animPieces.forEach((p) => {
         if (p.isFalling && !p.isLanded) {
             p.group.position.y += (0 - p.group.position.y) * dropSpeed;
-            
+
             // Update the matrices for this piece's instances
             for (let i = 0; i < p.instanceCount; i++) {
                 const globalIdx = p.instanceStart + i;
                 const offset = p.voxelOffsets[i];
-                
+
                 // Calculate current position based on falling group Y
                 dummy.position.set(
-                    offset.x, 
-                    offset.y + p.group.position.y, 
+                    offset.x,
+                    offset.y + p.group.position.y,
                     offset.z
                 );
                 dummy.scale.set(1, 1, 1);
                 dummy.updateMatrix();
-                
+
                 cubeInstancedMesh.setMatrixAt(globalIdx, dummy.matrix);
                 sphereInstancedMesh.setMatrixAt(globalIdx, dummy.matrix);
             }
@@ -663,7 +664,7 @@ function animate() {
                 p.group.position.y = 0;
                 p.isLanded = true;
                 // Ensure final position is exact
-                 for (let i = 0; i < p.instanceCount; i++) {
+                for (let i = 0; i < p.instanceCount; i++) {
                     const globalIdx = p.instanceStart + i;
                     const offset = p.voxelOffsets[i];
                     dummy.position.set(offset.x, offset.y, offset.z);
@@ -687,7 +688,7 @@ function animate() {
 
 window.addEventListener('resize', () => {
     const aspect = window.innerWidth / window.innerHeight;
-    
+
     // Update Perspective
     perspectiveCamera.aspect = aspect;
     perspectiveCamera.updateProjectionMatrix();
