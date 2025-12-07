@@ -118,6 +118,54 @@
             };
         }
 
+        // --- Shaders ---
+        const vertexShaderCommon = `
+            uniform float uT;
+            attribute vec3 oklabPos;
+            attribute vec3 srgbPos;
+            attribute vec3 color;
+            varying vec3 vColor;
+            
+            void main() {
+                vColor = color;
+                vec3 pos = mix(oklabPos, srgbPos, uT);
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+            }
+        `;
+
+        const fragmentShaderCommon = `
+            varying vec3 vColor;
+            void main() {
+                gl_FragColor = vec4(vColor, 1.0);
+            }
+        `;
+
+        // For Lines, we might want opacity
+        const fragmentShaderLines = `
+            varying vec3 vColor;
+            uniform float opacity;
+            void main() {
+                gl_FragColor = vec4(vColor, opacity);
+            }
+        `;
+
+        // For Instanced Spheres
+        // We use a slightly different vertex shader because we need to add the sphere's local position
+        const vertexShaderInstanced = `
+            uniform float uT;
+            attribute vec3 instanceOklabPos;
+            attribute vec3 instanceSrgbPos;
+            attribute vec3 instanceColor;
+            varying vec3 vColor;
+
+            void main() {
+                vColor = instanceColor;
+                vec3 offset = mix(instanceOklabPos, instanceSrgbPos, uT);
+                vec3 transformed = position + offset;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(transformed, 1.0);
+            }
+        `;
+
         // --- Scene Setup ---
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x202020);
@@ -132,13 +180,29 @@
         const controls = new OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
         controls.target.set(0, 0.5, 0);
-        controls.update();
+
+        // Idle Render Logic
+        let renderRequested = false;
+        function requestRender() {
+            if (!renderRequested) {
+                renderRequested = true;
+                requestAnimationFrame(render);
+            }
+        }
+
+        controls.addEventListener('change', requestRender);
 
         // --- Animation State ---
         let targetMode = 0; // 0 = Oklab, 1 = sRGB
         let currentT = 0;
-        const animatedGeometries = []; // For Lines (Axes, Gamut)
-        const animatedMeshes = []; // For Spheres (Data Points)
+        let animationProgress = 0;
+
+        // Uniforms shared by materials
+        const uniforms = {
+            uT: { value: 0 }
+        };
+
+        // --- Geometry Creation ---
 
         // Custom Axes
         function createAxes() {
@@ -146,8 +210,9 @@
             const steps = 64;
 
             function addGradientAxis(start, end) {
-                const positionsOklab = [];
-                const positionsRGB = [];
+                const positions = []; // Dummy positions, shader uses attributes
+                const oklabPos = [];
+                const srgbPos = [];
                 const colors = [];
 
                 for (let i = 0; i <= steps; i++) {
@@ -156,32 +221,38 @@
                     const y = start.y + (end.y - start.y) * t;
                     const z = start.z + (end.z - start.z) * t;
 
+                    positions.push(0, 0, 0); // Not used but required for bounding box calc usually
+
                     // Oklab Position
-                    positionsOklab.push(x, y, z);
+                    oklabPos.push(x, y, z);
 
                     // sRGB Position (mapped from Oklab)
                     const rgb = OKLAB_to_sRGB(y, x, z); // L=y, a=x, b=z
-                    // Clamp for safety in sRGB view
                     const r = Math.max(0, Math.min(1, rgb.r));
                     const g = Math.max(0, Math.min(1, rgb.g));
                     const bl = Math.max(0, Math.min(1, rgb.b));
 
                     // Center sRGB: subtract 0.5 from x and z, then scale by 0.8 to match axes
-                    positionsRGB.push((r - 0.5) * 0.8, g, (bl - 0.5) * 0.8);
+                    srgbPos.push((r - 0.5) * 0.8, g, (bl - 0.5) * 0.8);
 
                     colors.push(r, g, bl);
                 }
 
                 const geometry = new THREE.BufferGeometry();
-                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positionsOklab, 3));
-                geometry.setAttribute('oklabPosition', new THREE.Float32BufferAttribute(positionsOklab, 3));
-                geometry.setAttribute('srgbPosition', new THREE.Float32BufferAttribute(positionsRGB, 3));
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+                geometry.setAttribute('oklabPos', new THREE.Float32BufferAttribute(oklabPos, 3));
+                geometry.setAttribute('srgbPos', new THREE.Float32BufferAttribute(srgbPos, 3));
                 geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
 
-                const material = new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2 });
-                axesGroup.add(new THREE.Line(geometry, material));
+                const material = new THREE.ShaderMaterial({
+                    uniforms: uniforms,
+                    vertexShader: vertexShaderCommon,
+                    fragmentShader: fragmentShaderCommon,
+                    transparent: false,
+                    linewidth: 2
+                });
 
-                animatedGeometries.push(geometry);
+                axesGroup.add(new THREE.Line(geometry, material));
             }
 
             // L axis (Vertical)
@@ -199,8 +270,10 @@
         function createGamutWireframe() {
             const gridPointsOklab = [];
             const gridPointsRGB = [];
+            const gridColors = []; // We need colors for the shader
             const steps = 20;
             const gridDivisions = 10;
+            const dummyPos = [];
 
             function addGridSegment(p1, p2) {
                 for (let i = 0; i < steps; i++) {
@@ -220,6 +293,12 @@
                     let o2 = sRGB_to_OKLAB(c2[0] * 255, c2[1] * 255, c2[2] * 255);
                     gridPointsOklab.push(o1.a, o1.L, o1.b);
                     gridPointsOklab.push(o2.a, o2.L, o2.b);
+
+                    // Constant color for grid
+                    gridColors.push(0.33, 0.33, 0.33);
+                    gridColors.push(0.33, 0.33, 0.33);
+
+                    dummyPos.push(0, 0, 0, 0, 0, 0);
                 }
             }
 
@@ -244,19 +323,26 @@
             drawFaceGrid(2, 0); drawFaceGrid(2, 1);
 
             const gridGeo = new THREE.BufferGeometry();
-            gridGeo.setAttribute('position', new THREE.Float32BufferAttribute(gridPointsOklab, 3));
-            gridGeo.setAttribute('oklabPosition', new THREE.Float32BufferAttribute(gridPointsOklab, 3));
-            gridGeo.setAttribute('srgbPosition', new THREE.Float32BufferAttribute(gridPointsRGB, 3));
+            gridGeo.setAttribute('position', new THREE.Float32BufferAttribute(dummyPos, 3));
+            gridGeo.setAttribute('oklabPos', new THREE.Float32BufferAttribute(gridPointsOklab, 3));
+            gridGeo.setAttribute('srgbPos', new THREE.Float32BufferAttribute(gridPointsRGB, 3));
+            gridGeo.setAttribute('color', new THREE.Float32BufferAttribute(gridColors, 3));
 
-            const gridMat = new THREE.LineBasicMaterial({ color: 0x555555, transparent: true, opacity: 0.1 });
+            const gridMat = new THREE.ShaderMaterial({
+                uniforms: { ...uniforms, opacity: { value: 0.1 } },
+                vertexShader: vertexShaderCommon,
+                fragmentShader: fragmentShaderLines,
+                transparent: true,
+                depthWrite: false
+            });
             const gridLines = new THREE.LineSegments(gridGeo, gridMat);
             scene.add(gridLines);
-            animatedGeometries.push(gridGeo);
 
             // Main Edges
             const edgePositionsOklab = [];
             const edgePositionsRGB = [];
             const edgeColors = [];
+            const edgeDummyPos = [];
 
             function addColoredEdge(p1, p2) {
                 for (let i = 0; i < steps; i++) {
@@ -278,6 +364,8 @@
 
                     edgeColors.push(c1[0], c1[1], c1[2]);
                     edgeColors.push(c2[0], c2[1], c2[2]);
+
+                    edgeDummyPos.push(0, 0, 0, 0, 0, 0);
                 }
             }
 
@@ -286,21 +374,26 @@
             addColoredEdge([0, 0, 0], [0, 0, 1]); addColoredEdge([1, 0, 0], [1, 0, 1]); addColoredEdge([1, 1, 0], [1, 1, 1]); addColoredEdge([0, 1, 0], [0, 1, 1]);
 
             const edgeGeo = new THREE.BufferGeometry();
-            edgeGeo.setAttribute('position', new THREE.Float32BufferAttribute(edgePositionsOklab, 3));
-            edgeGeo.setAttribute('oklabPosition', new THREE.Float32BufferAttribute(edgePositionsOklab, 3));
-            edgeGeo.setAttribute('srgbPosition', new THREE.Float32BufferAttribute(edgePositionsRGB, 3));
+            edgeGeo.setAttribute('position', new THREE.Float32BufferAttribute(edgeDummyPos, 3));
+            edgeGeo.setAttribute('oklabPos', new THREE.Float32BufferAttribute(edgePositionsOklab, 3));
+            edgeGeo.setAttribute('srgbPos', new THREE.Float32BufferAttribute(edgePositionsRGB, 3));
             edgeGeo.setAttribute('color', new THREE.Float32BufferAttribute(edgeColors, 3));
 
-            const edgeMat = new THREE.LineBasicMaterial({ vertexColors: true, linewidth: 2, opacity: 0.8, transparent: true });
+            const edgeMat = new THREE.ShaderMaterial({
+                uniforms: { ...uniforms, opacity: { value: 0.8 } },
+                vertexShader: vertexShaderCommon,
+                fragmentShader: fragmentShaderLines,
+                transparent: true,
+                linewidth: 2
+            });
             const edgeLines = new THREE.LineSegments(edgeGeo, edgeMat);
             scene.add(edgeLines);
-            animatedGeometries.push(edgeGeo);
         }
 
         createGamutWireframe();
 
         // --- Data Loading ---
-        let currentPoints = [];
+        let currentInstancedMesh = null;
 
         async function loadData(n) {
             const statusEl = document.getElementById('status');
@@ -313,9 +406,7 @@
                 const text = await response.text();
                 const lines = text.split('\n');
 
-                let count = 0;
-                const sphereGeo = new THREE.SphereGeometry(0.02, 32, 32);
-                const newPoints = [];
+                const dataPoints = [];
 
                 lines.forEach(line => {
                     line = line.trim();
@@ -325,50 +416,83 @@
                             const hex = parts[1];
                             const rgbStr = parts[2];
                             const rgb = rgbStr.split(',').map(Number);
-
                             const oklab = sRGB_to_OKLAB(rgb[0], rgb[1], rgb[2]);
 
-                            const material = new THREE.MeshBasicMaterial({ color: hex });
-                            const sphere = new THREE.Mesh(sphereGeo, material);
-
-                            // Store positions for animation
-                            sphere.userData.oklabPos = new THREE.Vector3(oklab.a, oklab.L, oklab.b);
-                            // Centered sRGB and Scaled
-                            sphere.userData.srgbPos = new THREE.Vector3((rgb[0] / 255 - 0.5) * 0.8, rgb[1] / 255, (rgb[2] / 255 - 0.5) * 0.8);
-
-                            // Set initial position based on currentT
-                            sphere.position.lerpVectors(sphere.userData.oklabPos, sphere.userData.srgbPos, currentT);
-
-                            newPoints.push(sphere);
-                            count++;
+                            dataPoints.push({
+                                rgb: rgb,
+                                oklab: oklab,
+                                hex: hex
+                            });
                         }
                     }
                 });
 
-                // Clear old points from scene and animation list
-                currentPoints.forEach(p => {
-                    scene.remove(p);
-                    const idx = animatedMeshes.indexOf(p);
-                    if (idx > -1) animatedMeshes.splice(idx, 1);
-                });
+                // Remove old mesh
+                if (currentInstancedMesh) {
+                    scene.remove(currentInstancedMesh);
+                    currentInstancedMesh.geometry.dispose();
+                    currentInstancedMesh.material.dispose();
+                    currentInstancedMesh = null;
+                }
 
-                currentPoints = newPoints;
-                currentPoints.forEach(p => {
-                    scene.add(p);
-                    animatedMeshes.push(p);
-                });
+                if (dataPoints.length > 0) {
+                    const geometry = new THREE.SphereGeometry(0.02, 16, 16); // Reduced segments for performance
+                    const material = new THREE.ShaderMaterial({
+                        uniforms: uniforms,
+                        vertexShader: vertexShaderInstanced,
+                        fragmentShader: fragmentShaderCommon
+                    });
 
-                statusEl.textContent = `Loaded ${count} colors (N=${n}).`;
+                    const instancedMesh = new THREE.InstancedMesh(geometry, material, dataPoints.length);
+
+                    const instanceOklabPos = new Float32Array(dataPoints.length * 3);
+                    const instanceSrgbPos = new Float32Array(dataPoints.length * 3);
+                    const instanceColor = new Float32Array(dataPoints.length * 3);
+
+                    const dummy = new THREE.Object3D();
+
+                    dataPoints.forEach((pt, i) => {
+                        // Oklab
+                        instanceOklabPos[i * 3] = pt.oklab.a;
+                        instanceOklabPos[i * 3 + 1] = pt.oklab.L;
+                        instanceOklabPos[i * 3 + 2] = pt.oklab.b;
+
+                        // sRGB (Centered and Scaled)
+                        instanceSrgbPos[i * 3] = (pt.rgb[0] / 255 - 0.5) * 0.8;
+                        instanceSrgbPos[i * 3 + 1] = pt.rgb[1] / 255;
+                        instanceSrgbPos[i * 3 + 2] = (pt.rgb[2] / 255 - 0.5) * 0.8;
+
+                        // Color
+                        const col = new THREE.Color(pt.hex);
+                        instanceColor[i * 3] = col.r;
+                        instanceColor[i * 3 + 1] = col.g;
+                        instanceColor[i * 3 + 2] = col.b;
+
+                        // Set identity matrix (we do positioning in shader)
+                        dummy.position.set(0, 0, 0);
+                        dummy.updateMatrix();
+                        instancedMesh.setMatrixAt(i, dummy.matrix);
+                    });
+
+                    geometry.setAttribute('instanceOklabPos', new THREE.InstancedBufferAttribute(instanceOklabPos, 3));
+                    geometry.setAttribute('instanceSrgbPos', new THREE.InstancedBufferAttribute(instanceSrgbPos, 3));
+                    geometry.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(instanceColor, 3));
+
+                    scene.add(instancedMesh);
+                    currentInstancedMesh = instancedMesh;
+                }
+
+                statusEl.textContent = `Loaded ${dataPoints.length} colors (N=${n}).`;
+                requestRender();
 
             } catch (err) {
                 console.error(err);
                 statusEl.textContent = `Error: ${err.message}`;
-                currentPoints.forEach(p => {
-                    scene.remove(p);
-                    const idx = animatedMeshes.indexOf(p);
-                    if (idx > -1) animatedMeshes.splice(idx, 1);
-                });
-                currentPoints = [];
+                if (currentInstancedMesh) {
+                    scene.remove(currentInstancedMesh);
+                    currentInstancedMesh = null;
+                }
+                requestRender();
             }
         }
 
@@ -393,6 +517,8 @@
             const url = new URL(window.location);
             url.searchParams.set('mode', targetMode === 0 ? 'oklab' : 'srgb');
             window.history.pushState({}, '', url);
+
+            requestRender();
         });
 
         const urlParams = new URLSearchParams(window.location.search);
@@ -406,21 +532,22 @@
             targetMode = 1;
             currentT = 1; // Start immediately in sRGB
             animationProgress = 1;
+            uniforms.uT.value = 1;
             toggleBtn.textContent = "Switch to Oklab";
         }
 
         // --- Animation Loop ---
-        // --- Animation Loop ---
-        let animationProgress = 0; // 0 to 1
-        let isAnimating = false;
 
         // Septic polynomial: 35t^4 - 84t^5 + 70t^6 - 20t^7
         function septic(t) {
             return t * t * t * t * (35 + t * (-84 + t * (70 - 20 * t)));
         }
 
-        function animate() {
-            requestAnimationFrame(animate);
+        function render() {
+            renderRequested = false;
+            controls.update();
+
+            let needsMoreFrames = false;
 
             if (Math.abs(animationProgress - targetMode) > 0.0001) {
                 // Move progress linearly towards target
@@ -432,41 +559,27 @@
                 }
 
                 // Apply septic easing
-                // If target is 1, we want easing from 0 to 1.
-                // If target is 0, we want easing from 1 to 0.
-                // The septic function maps [0,1] to [0,1].
                 currentT = septic(animationProgress);
+                uniforms.uT.value = currentT;
 
-                // Update Geometries (Lines)
-                animatedGeometries.forEach(geo => {
-                    const oklabPos = geo.attributes.oklabPosition;
-                    const srgbPos = geo.attributes.srgbPosition;
-                    const pos = geo.attributes.position;
-
-                    for (let i = 0; i < pos.count; i++) {
-                        const x = THREE.MathUtils.lerp(oklabPos.getX(i), srgbPos.getX(i), currentT);
-                        const y = THREE.MathUtils.lerp(oklabPos.getY(i), srgbPos.getY(i), currentT);
-                        const z = THREE.MathUtils.lerp(oklabPos.getZ(i), srgbPos.getZ(i), currentT);
-                        pos.setXYZ(i, x, y, z);
-                    }
-                    pos.needsUpdate = true;
-                });
-
-                // Update Meshes (Spheres)
-                animatedMeshes.forEach(mesh => {
-                    mesh.position.lerpVectors(mesh.userData.oklabPos, mesh.userData.srgbPos, currentT);
-                });
+                needsMoreFrames = true;
             }
 
-            controls.update();
             renderer.render(scene, camera);
+
+            if (needsMoreFrames) {
+                requestRender();
+            }
         }
-        animate();
+
+        // Initial render
+        requestRender();
 
         window.addEventListener('resize', () => {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
             renderer.setSize(window.innerWidth, window.innerHeight);
+            requestRender();
         });
     </script>
 </body>
