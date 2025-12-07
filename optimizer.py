@@ -5,6 +5,8 @@ import os
 import signal
 import sys
 import argparse
+import threading
+import queue
 import numba
 from numba import jit as njit
 
@@ -348,6 +350,11 @@ class ColorOptimizer:
         self.force_fresh = force_fresh
         self.rng = np.random.default_rng(42)
         
+        # Auto-save queue and thread
+        self.save_queue = queue.Queue()
+        self.save_thread = threading.Thread(target=self._save_worker, daemon=True)
+        self.save_thread.start()
+        
         # Simulated Annealing parameters
         self.initial_temp = 1.0
         self.final_temp = 0.0001
@@ -412,9 +419,27 @@ class ColorOptimizer:
     def calculate_score(self, min_dist, std_dev):
         return calculate_score(min_dist, std_dev)
 
-    def save_state(self, iteration, current_score, current_min_dist, current_std_dev, best_score, best_colors, best_min_dist, ext_iter=0, iters_since_improvement=0, last_improvement_val=0.0):
+    def _save_worker(self):
+        """Worker thread to handle save operations from the queue."""
+        while True:
+            try:
+                args = self.save_queue.get()
+                if args is None: # Sentinel
+                    break
+                self.save_state(*args, silent=True)
+                self.save_queue.task_done()
+            except Exception as e:
+                # Just print error, don't crash thread
+                print(f"Auto-save failed: {e}")
+
+    def save_state(self, iteration, current_score, current_min_dist, current_std_dev, best_score, best_colors, best_min_dist, ext_iter=0, iters_since_improvement=0, last_improvement_val=0.0, silent=False):
         """Save the current state to a file."""
-        print(f"\nSaving state at iteration {iteration} (Ext: {ext_iter})...")
+        if not silent:
+            try:
+                print(f"\nSaving state at iteration {iteration} (Ext: {ext_iter})...")
+            except (BrokenPipeError, OSError):
+                pass
+            
         state = {
             'iteration': iteration,
             'colors_oklch': self.colors_oklch.tolist(),
@@ -429,9 +454,22 @@ class ColorOptimizer:
             'iters_since_improvement': int(iters_since_improvement),
             'last_improvement_val': float(last_improvement_val)
         }
-        with open(self.state_file, 'w') as f:
-            json.dump(state, f, indent=2)
-        print("State saved.")
+        try:
+            with open(self.state_file, 'w') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            # If we can't write to file, we are in trouble, but try to print error
+            if not silent:
+                try:
+                    print(f"Error saving state: {e}")
+                except:
+                    pass
+                
+        if not silent:
+            try:
+                print("State saved.")
+            except (BrokenPipeError, OSError):
+                pass
 
     def load_state(self):
         """Load state from file if it exists."""
@@ -517,7 +555,11 @@ class ColorOptimizer:
         
         # Handle graceful shutdown
         def signal_handler(sig, frame):
-            print("\nInterrupted! Saving state...")
+            try:
+                print("\nInterrupted! Saving state...")
+            except (BrokenPipeError, OSError):
+                pass
+                
             try:
                 current_iter = i
             except NameError:
@@ -538,18 +580,33 @@ class ColorOptimizer:
                 # CTRL_C_EVENT = 0
                 # CTRL_BREAK_EVENT = 1
                 # CTRL_CLOSE_EVENT = 2
-                if ctrl_type in (0, 1, 2):
-                    print(f"\nConsole event {ctrl_type} received. Saving state...")
+                
+                # Let Python handle CTRL_C_EVENT (0) via KeyboardInterrupt/SIGINT
+                if ctrl_type == 0:
+                    return False
+                
+                if ctrl_type in (1, 2):
+                    # Suppress print to avoid console lock contention during close
+                    # try:
+                    #     print(f"\nConsole event {ctrl_type} received. Saving state...")
+                    # except (BrokenPipeError, OSError):
+                    #     pass
+                        
                     try:
                         try:
                             current_iter = i
                         except NameError:
                             current_iter = self.start_iteration
                             
-                        self.save_state(current_iter, current_score, current_min_dist, current_std_dev, best_score, best_colors, best_min_dist, ext_iter, iters_since_improvement, last_improvement_val)
-                        return True # Indicate we handled it
+                        self.save_state(current_iter, current_score, current_min_dist, current_std_dev, best_score, best_colors, best_min_dist, ext_iter, iters_since_improvement, last_improvement_val, silent=True)
+                        
+                        # For CTRL_CLOSE_EVENT, we must exit immediately as we are in a handler thread
+                        # and the process is about to be killed.
+                        import os
+                        os._exit(0)
+                        return True
                     except Exception as e:
-                        print(f"Error in console handler: {e}")
+                        # print(f"Error in console handler: {e}")
                         return False
                 return False
             
@@ -591,6 +648,18 @@ class ColorOptimizer:
                     best_score, best_colors, best_min_dist,
                     seed + i # Vary seed slightly
                 )
+                
+                # Auto-save check
+                current_iter = i + iters_to_run
+                if current_iter % 10_000_000 == 0:
+                     # Create snapshot for thread safety
+                     # We need to copy mutable arrays: best_colors
+                     # Other values are immutable (int, float)
+                     self.save_queue.put((
+                         current_iter, current_score, current_min_dist, current_std_dev,
+                         best_score, best_colors.copy(), best_min_dist,
+                         0, 0, 0 # ext_iter, iters_since_imp, last_imp
+                     ))
                 
                 # Update progress
                 current_iter = i + iters_to_run
@@ -641,6 +710,14 @@ class ColorOptimizer:
                 )
                 
                 ext_iter += iters_done
+                
+                # Auto-save check
+                if ext_iter % 10_000_000 == 0:
+                     self.save_queue.put((
+                         self.iterations, current_score, current_min_dist, current_std_dev,
+                         best_score, best_colors.copy(), best_min_dist,
+                         ext_iter, iters_since_improvement, last_improvement_val
+                     ))
                 
                 if stop_early:
                     print(f"\nExtended Phase Complete: Reached target StdDev ({current_std_dev:.6f}) AND MinDist plateaued.")

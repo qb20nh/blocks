@@ -45,15 +45,20 @@ ANSI_HOME = "\033[H"
 ANSI_CURSOR_UP = "\033[A"
 ANSI_CLEAR_LINE = "\033[K"
 
-def init_worker(q, priority_level, force_fresh):
+def init_worker(q, priority_level, force_fresh, abort_val):
     """Initialize worker with the queue and settings."""
-    global queue, WORKER_PRIORITY, FORCE_FRESH
+    global queue, WORKER_PRIORITY, FORCE_FRESH, ABORT_VAL
     queue = q
     WORKER_PRIORITY = priority_level
     FORCE_FRESH = force_fresh
+    ABORT_VAL = abort_val
 
 def run_optimizer(n):
     """Runs the optimizer for a specific number of colors."""
+    # Check abort value (safe to read shared memory)
+    if ABORT_VAL.value == 1:
+        return n, False, "Aborted"
+        
     # Set environment variables to ensure single-core execution per task
     env = os.environ.copy()
     env["OMP_NUM_THREADS"] = "1"
@@ -62,7 +67,6 @@ def run_optimizer(n):
     env["VECLIB_MAXIMUM_THREADS"] = "1"
     env["NUMEXPR_NUM_THREADS"] = "1"
     
-    # Check if already done
     # Check if already done
     result_file = os.path.join("results", f"colors_{n}.txt")
     state_file = os.path.join("results", f"optimizer_state_{n}.pkl")
@@ -88,19 +92,62 @@ def run_optimizer(n):
             cmd.append("--force")
 
         # Run the optimizer script with unbuffered output
-        process = subprocess.Popen(
-            cmd,
-            env=env,
-            creationflags=creationflags,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding='utf-8',
-            errors='replace'
-        )
-        
         try:
-            for line in process.stdout:
+            process = subprocess.Popen(
+                cmd,
+                env=env,
+                creationflags=creationflags,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding='utf-8',
+                errors='replace'
+            )
+        except (OSError, ValueError) as e:
+            # Catch errors like "Duplicate handle" or process creation failures during shutdown
+            return n, False, f"Spawn Failed: {e}"
+        
+        # Non-blocking output reader
+        import queue as std_queue # Rename to avoid conflict with global 'queue'
+        line_queue = std_queue.Queue()
+        
+        def reader_thread(proc, q):
+            try:
+                for line in proc.stdout:
+                    q.put(line)
+            except:
+                pass
+            finally:
+                q.put(None) # Sentinel
+
+        t = threading.Thread(target=reader_thread, args=(process, line_queue))
+        t.daemon = True # Ensure thread dies if main process dies
+        t.start()
+
+        try:
+            while True:
+                # Check abort signal
+                if ABORT_VAL.value == 1:
+                    process.terminate()
+                    return n, False, "Aborted"
+
+                # Check if process is done
+                ret = process.poll()
+                
+                # Try to read lines (non-blocking w/ timeout)
+                try:
+                    # Wait a bit for output, but yield frequently to check abort
+                    line = line_queue.get(timeout=0.1)
+                except std_queue.Empty:
+                    # No output yet
+                    if ret is not None:
+                        # Process finished and queue empty
+                        break
+                    continue
+
+                if line is None: # Sentinel
+                    break
+
                 line = line.strip()
                 if line:
                     if "Ext Iter" in line:
@@ -109,9 +156,9 @@ def run_optimizer(n):
                             # Shorten to: Ext 1: Score=...
                             parts = line.split(":")
                             if len(parts) > 1:
-                                 # Try to extract score
-                                 score_part = line.split("Score=")[1].split("(")[0].strip()
-                                 queue.put((n, f"Ext {parts[0].split(' ')[2]}: Score={score_part}"))
+                                    # Try to extract score
+                                    score_part = line.split("Score=")[1].split("(")[0].strip()
+                                    queue.put((n, f"Ext {parts[0].split(' ')[2]}: Score={score_part}"))
                             else:
                                 queue.put((n, "Ext Refining..."))
                         except:
@@ -334,6 +381,8 @@ def main():
     # Use standard multiprocessing.Queue instead of Manager
     queue = multiprocessing.Queue()
     stop_event = threading.Event()
+    # Use multiprocessing.Value for robust abort signaling
+    abort_val = multiprocessing.Value('i', 0)
     
     # Start display thread
     display_thread = threading.Thread(target=display_manager, args=(queue, nums, args.threads, stop_event))
@@ -342,16 +391,27 @@ def main():
     priority_val = PRIORITY_MAP[args.priority]
     
     # Windows Console Control Handler for Main Process
+    # We need to define it here to access 'pool' variable which we will initialize shortly
+    pool = None
+    
     if sys.platform == 'win32':
         import ctypes
         def console_ctrl_handler(ctrl_type):
             if ctrl_type == 2: # CTRL_CLOSE_EVENT
                 print("\nMain process received CTRL_CLOSE_EVENT. Waiting for workers...")
-                # We return True to tell Windows "we are handling this, don't kill us yet".
-                # This gives us some time (usually 5 seconds) before forced termination.
-                # The workers should also receive this event and start saving.
-                # We just need to stay alive long enough for them to finish.
-                time.sleep(3) # Wait a bit to ensure workers have CPU time
+                # Signal workers to abort new tasks
+                abort_val.value = 1
+                
+                # If pool is running, close and join it to wait exactly as long as needed
+                if pool:
+                    try:
+                        pool.close()
+                        pool.join()
+                    except:
+                        pass
+                
+                # Force exit immediately after workers are done
+                os._exit(0)
                 return True
             return False
             
@@ -361,27 +421,39 @@ def main():
     try:
         with prevent_sleep():
             # Use initializer to pass queue to workers
-            with multiprocessing.Pool(processes=args.threads, initializer=init_worker, initargs=(queue, priority_val, args.force)) as pool:
+            # We assign to the outer 'pool' variable so the handler can access it
+            pool = multiprocessing.Pool(processes=args.threads, initializer=init_worker, initargs=(queue, priority_val, args.force, abort_val))
+            try:
+                # Map just the numbers, worker uses global queue
+                results = pool.map(run_optimizer, nums)
+                pool.close()
+                pool.join()
+            except KeyboardInterrupt:
+                print("\nMain process interrupted. Waiting for workers to save state...")
+                # Signal workers to abort new tasks
+                abort_val.value = 1
+                # Explicitly close and join the pool to allow workers to finish their cleanup.
+                # This prevents the context manager from calling terminate() immediately.
+                pool.close()
+                pool.join()
+            except Exception:
+                pool.terminate()
+                raise
+            finally:
+                # Ensure pool is closed if not already
                 try:
-                    # Map just the numbers, worker uses global queue
-                    results = pool.map(run_optimizer, nums)
-                except KeyboardInterrupt:
-                    print("\nMain process interrupted. Waiting for workers to save state...")
-                    # We do NOT want to terminate the pool immediately.
-                    # The workers will catch the interrupt and finish saving.
-                    # We just need to wait for them to exit.
-                    # pool.__exit__ will call terminate() if an exception propagates out of the with block?
-                    # Actually, if we catch it here, we exit the inner try.
-                    # Then we exit the 'with pool' block.
-                    # The 'with pool' block calls pool.terminate() if an exception occurred, or pool.join() if not?
-                    # Wait, standard multiprocessing.Pool context manager calls terminate() on exception.
-                    # So we must NOT let the exception propagate out of the 'with' block if we want to wait.
+                    pool.close()
+                    pool.join()
+                except:
                     pass
     finally:
         stop_event.set()
         display_thread.join()
             
-    print("\nAll tasks completed.")
+    if abort_val.value == 1:
+        print("\nOptimization interrupted.")
+    else:
+        print("\nAll tasks completed.")
 
 if __name__ == "__main__":
     # Enable ANSI support on Windows if needed (Python 3.8+ does this automatically mostly)
