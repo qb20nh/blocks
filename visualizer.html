@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>3D Color Visualizer (OKLAB)</title>
+    <link rel="preconnect" href="https://unpkg.com">
     <style>
         body {
             margin: 0;
@@ -37,6 +38,8 @@
             background: #555;
         }
     </style>
+    <link rel="modulepreload" href="https://unpkg.com/three@0.160.0/build/three.module.js">
+    <link rel="modulepreload" href="https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js">
     <script type="importmap">
         {
             "imports": {
@@ -268,53 +271,113 @@
 
         // --- Gamut Visualization ---
         function createGamutWireframe() {
-            const gridPointsOklab = [];
-            const gridPointsRGB = [];
-            const gridColors = []; // We need colors for the shader
             const steps = 20;
             const gridDivisions = 10;
-            const dummyPos = [];
 
-            function addGridSegment(p1, p2) {
+            // Calculate total vertices for grid
+            // 6 faces * (gridDivisions - 1) lines * 2 directions * steps segments * 2 vertices
+            const gridSegmentCount = 6 * (gridDivisions - 1) * 2;
+            const totalGridVertices = gridSegmentCount * steps * 2;
+
+            const gridOklabPos = new Float32Array(totalGridVertices * 3);
+            const gridSrgbPos = new Float32Array(totalGridVertices * 3);
+            const gridColors = new Float32Array(totalGridVertices * 3);
+            const gridDummyPos = new Float32Array(totalGridVertices * 3); // Zeros
+
+            let gridIdx = 0;
+
+            function addGridSegment(p1x, p1y, p1z, p2x, p2y, p2z, fixedDim, fixedVal) {
+                const dx = p2x - p1x;
+                const dy = p2y - p1y;
+                const dz = p2z - p1z;
+
                 for (let i = 0; i < steps; i++) {
-                    let t1 = i / steps;
-                    let t2 = (i + 1) / steps;
+                    const t1 = i / steps;
+                    const t2 = (i + 1) / steps;
 
-                    // Interpolate in sRGB space (linear)
-                    let c1 = [p1[0] + (p2[0] - p1[0]) * t1, p1[1] + (p2[1] - p1[1]) * t1, p1[2] + (p2[2] - p1[2]) * t1];
-                    let c2 = [p1[0] + (p2[0] - p1[0]) * t2, p1[1] + (p2[1] - p1[1]) * t2, p1[2] + (p2[2] - p1[2]) * t2];
+                    // Point 1
+                    const c1x = p1x + dx * t1;
+                    const c1y = p1y + dy * t1;
+                    const c1z = p1z + dz * t1;
+
+                    // Point 2
+                    const c2x = p1x + dx * t2;
+                    const c2y = p1y + dy * t2;
+                    const c2z = p1z + dz * t2;
 
                     // sRGB positions (Centered and Scaled)
-                    gridPointsRGB.push((c1[0] - 0.5) * 0.8, c1[1], (c1[2] - 0.5) * 0.8);
-                    gridPointsRGB.push((c2[0] - 0.5) * 0.8, c2[1], (c2[2] - 0.5) * 0.8);
+                    gridSrgbPos[gridIdx] = (c1x - 0.5) * 0.8;
+                    gridSrgbPos[gridIdx + 1] = c1y;
+                    gridSrgbPos[gridIdx + 2] = (c1z - 0.5) * 0.8;
+
+                    gridSrgbPos[gridIdx + 3] = (c2x - 0.5) * 0.8;
+                    gridSrgbPos[gridIdx + 4] = c2y;
+                    gridSrgbPos[gridIdx + 5] = (c2z - 0.5) * 0.8;
 
                     // Oklab positions
-                    let o1 = sRGB_to_OKLAB(c1[0] * 255, c1[1] * 255, c1[2] * 255);
-                    let o2 = sRGB_to_OKLAB(c2[0] * 255, c2[1] * 255, c2[2] * 255);
-                    gridPointsOklab.push(o1.a, o1.L, o1.b);
-                    gridPointsOklab.push(o2.a, o2.L, o2.b);
+                    const o1 = sRGB_to_OKLAB(c1x * 255, c1y * 255, c1z * 255);
+                    const o2 = sRGB_to_OKLAB(c2x * 255, c2y * 255, c2z * 255);
 
-                    // Constant color for grid
-                    gridColors.push(0.33, 0.33, 0.33);
-                    gridColors.push(0.33, 0.33, 0.33);
+                    gridOklabPos[gridIdx] = o1.a;
+                    gridOklabPos[gridIdx + 1] = o1.L;
+                    gridOklabPos[gridIdx + 2] = o1.b;
 
-                    dummyPos.push(0, 0, 0, 0, 0, 0);
+                    gridOklabPos[gridIdx + 3] = o2.a;
+                    gridOklabPos[gridIdx + 4] = o2.L;
+                    gridOklabPos[gridIdx + 5] = o2.b;
+
+                    // Color (Constant Grey)
+                    gridColors[gridIdx] = 0.33; gridColors[gridIdx + 1] = 0.33; gridColors[gridIdx + 2] = 0.33;
+                    gridColors[gridIdx + 3] = 0.33; gridColors[gridIdx + 4] = 0.33; gridColors[gridIdx + 5] = 0.33;
+
+                    gridIdx += 6;
                 }
             }
 
             function drawFaceGrid(fixedDim, fixedVal) {
                 for (let i = 1; i < gridDivisions; i++) {
-                    let t = i / gridDivisions;
-                    let start1 = [0, 0, 0]; start1[fixedDim] = fixedVal;
-                    let end1 = [0, 0, 0]; end1[fixedDim] = fixedVal;
-                    let start2 = [0, 0, 0]; start2[fixedDim] = fixedVal;
-                    let end2 = [0, 0, 0]; end2[fixedDim] = fixedVal;
-                    let d1 = (fixedDim + 1) % 3;
-                    let d2 = (fixedDim + 2) % 3;
-                    start1[d1] = 0; start1[d2] = t; end1[d1] = 1; end1[d2] = t;
-                    addGridSegment(start1, end1);
-                    start2[d2] = 0; start2[d1] = t; end2[d2] = 1; end2[d1] = t;
-                    addGridSegment(start2, end2);
+                    const t = i / gridDivisions;
+
+                    // Line 1
+                    let s1x = 0, s1y = 0, s1z = 0;
+                    let e1x = 0, e1y = 0, e1z = 0;
+
+                    if (fixedDim === 0) { s1x = fixedVal; e1x = fixedVal; }
+                    if (fixedDim === 1) { s1y = fixedVal; e1y = fixedVal; }
+                    if (fixedDim === 2) { s1z = fixedVal; e1z = fixedVal; }
+
+                    const d1 = (fixedDim + 1) % 3;
+                    const d2 = (fixedDim + 2) % 3;
+
+                    // Set start/end for d1=0..1, d2=t
+                    if (d1 === 0) { s1x = 0; e1x = 1; }
+                    if (d1 === 1) { s1y = 0; e1y = 1; }
+                    if (d1 === 2) { s1z = 0; e1z = 1; }
+
+                    if (d2 === 0) { s1x = t; e1x = t; }
+                    if (d2 === 1) { s1y = t; e1y = t; }
+                    if (d2 === 2) { s1z = t; e1z = t; }
+
+                    addGridSegment(s1x, s1y, s1z, e1x, e1y, e1z);
+
+                    // Line 2
+                    let s2x = 0, s2y = 0, s2z = 0;
+                    let e2x = 0, e2y = 0, e2z = 0;
+
+                    if (fixedDim === 0) { s2x = fixedVal; e2x = fixedVal; }
+                    if (fixedDim === 1) { s2y = fixedVal; e2y = fixedVal; }
+                    if (fixedDim === 2) { s2z = fixedVal; e2z = fixedVal; }
+
+                    // Set start/end for d2=0..1, d1=t
+                    if (d2 === 0) { s2x = 0; e2x = 1; }
+                    if (d2 === 1) { s2y = 0; e2y = 1; }
+                    if (d2 === 2) { s2z = 0; e2z = 1; }
+
+                    if (d1 === 0) { s2x = t; e2x = t; }
+                    if (d1 === 1) { s2y = t; e2y = t; }
+                    if (d1 === 2) { s2z = t; e2z = t; }
+
+                    addGridSegment(s2x, s2y, s2z, e2x, e2y, e2z);
                 }
             }
 
@@ -323,10 +386,10 @@
             drawFaceGrid(2, 0); drawFaceGrid(2, 1);
 
             const gridGeo = new THREE.BufferGeometry();
-            gridGeo.setAttribute('position', new THREE.Float32BufferAttribute(dummyPos, 3));
-            gridGeo.setAttribute('oklabPos', new THREE.Float32BufferAttribute(gridPointsOklab, 3));
-            gridGeo.setAttribute('srgbPos', new THREE.Float32BufferAttribute(gridPointsRGB, 3));
-            gridGeo.setAttribute('color', new THREE.Float32BufferAttribute(gridColors, 3));
+            gridGeo.setAttribute('position', new THREE.BufferAttribute(gridDummyPos, 3));
+            gridGeo.setAttribute('oklabPos', new THREE.BufferAttribute(gridOklabPos, 3));
+            gridGeo.setAttribute('srgbPos', new THREE.BufferAttribute(gridSrgbPos, 3));
+            gridGeo.setAttribute('color', new THREE.BufferAttribute(gridColors, 3));
 
             const gridMat = new THREE.ShaderMaterial({
                 uniforms: { ...uniforms, opacity: { value: 0.1 } },
@@ -339,45 +402,71 @@
             scene.add(gridLines);
 
             // Main Edges
-            const edgePositionsOklab = [];
-            const edgePositionsRGB = [];
-            const edgeColors = [];
-            const edgeDummyPos = [];
+            const edgeCount = 12;
+            const totalEdgeVertices = edgeCount * steps * 2;
 
-            function addColoredEdge(p1, p2) {
+            const edgeOklabPos = new Float32Array(totalEdgeVertices * 3);
+            const edgeSrgbPos = new Float32Array(totalEdgeVertices * 3);
+            const edgeColors = new Float32Array(totalEdgeVertices * 3);
+            const edgeDummyPos = new Float32Array(totalEdgeVertices * 3);
+
+            let edgeIdx = 0;
+
+            function addColoredEdge(p1x, p1y, p1z, p2x, p2y, p2z) {
+                const dx = p2x - p1x;
+                const dy = p2y - p1y;
+                const dz = p2z - p1z;
+
                 for (let i = 0; i < steps; i++) {
-                    let t1 = i / steps;
-                    let t2 = (i + 1) / steps;
+                    const t1 = i / steps;
+                    const t2 = (i + 1) / steps;
 
-                    let c1 = [p1[0] + (p2[0] - p1[0]) * t1, p1[1] + (p2[1] - p1[1]) * t1, p1[2] + (p2[2] - p1[2]) * t1];
-                    let c2 = [p1[0] + (p2[0] - p1[0]) * t2, p1[1] + (p2[1] - p1[1]) * t2, p1[2] + (p2[2] - p1[2]) * t2];
+                    const c1x = p1x + dx * t1;
+                    const c1y = p1y + dy * t1;
+                    const c1z = p1z + dz * t1;
 
-                    // Centered sRGB and Scaled
-                    edgePositionsRGB.push((c1[0] - 0.5) * 0.8, c1[1], (c1[2] - 0.5) * 0.8);
-                    edgePositionsRGB.push((c2[0] - 0.5) * 0.8, c2[1], (c2[2] - 0.5) * 0.8);
+                    const c2x = p1x + dx * t2;
+                    const c2y = p1y + dy * t2;
+                    const c2z = p1z + dz * t2;
 
-                    let o1 = sRGB_to_OKLAB(c1[0] * 255, c1[1] * 255, c1[2] * 255);
-                    let o2 = sRGB_to_OKLAB(c2[0] * 255, c2[1] * 255, c2[2] * 255);
+                    // sRGB
+                    edgeSrgbPos[edgeIdx] = (c1x - 0.5) * 0.8;
+                    edgeSrgbPos[edgeIdx + 1] = c1y;
+                    edgeSrgbPos[edgeIdx + 2] = (c1z - 0.5) * 0.8;
 
-                    edgePositionsOklab.push(o1.a, o1.L, o1.b);
-                    edgePositionsOklab.push(o2.a, o2.L, o2.b);
+                    edgeSrgbPos[edgeIdx + 3] = (c2x - 0.5) * 0.8;
+                    edgeSrgbPos[edgeIdx + 4] = c2y;
+                    edgeSrgbPos[edgeIdx + 5] = (c2z - 0.5) * 0.8;
 
-                    edgeColors.push(c1[0], c1[1], c1[2]);
-                    edgeColors.push(c2[0], c2[1], c2[2]);
+                    // Oklab
+                    const o1 = sRGB_to_OKLAB(c1x * 255, c1y * 255, c1z * 255);
+                    const o2 = sRGB_to_OKLAB(c2x * 255, c2y * 255, c2z * 255);
 
-                    edgeDummyPos.push(0, 0, 0, 0, 0, 0);
+                    edgeOklabPos[edgeIdx] = o1.a;
+                    edgeOklabPos[edgeIdx + 1] = o1.L;
+                    edgeOklabPos[edgeIdx + 2] = o1.b;
+
+                    edgeOklabPos[edgeIdx + 3] = o2.a;
+                    edgeOklabPos[edgeIdx + 4] = o2.L;
+                    edgeOklabPos[edgeIdx + 5] = o2.b;
+
+                    // Color
+                    edgeColors[edgeIdx] = c1x; edgeColors[edgeIdx + 1] = c1y; edgeColors[edgeIdx + 2] = c1z;
+                    edgeColors[edgeIdx + 3] = c2x; edgeColors[edgeIdx + 4] = c2y; edgeColors[edgeIdx + 5] = c2z;
+
+                    edgeIdx += 6;
                 }
             }
 
-            addColoredEdge([0, 0, 0], [1, 0, 0]); addColoredEdge([1, 0, 0], [1, 1, 0]); addColoredEdge([1, 1, 0], [0, 1, 0]); addColoredEdge([0, 1, 0], [0, 0, 0]);
-            addColoredEdge([0, 0, 1], [1, 0, 1]); addColoredEdge([1, 0, 1], [1, 1, 1]); addColoredEdge([1, 1, 1], [0, 1, 1]); addColoredEdge([0, 1, 1], [0, 0, 1]);
-            addColoredEdge([0, 0, 0], [0, 0, 1]); addColoredEdge([1, 0, 0], [1, 0, 1]); addColoredEdge([1, 1, 0], [1, 1, 1]); addColoredEdge([0, 1, 0], [0, 1, 1]);
+            addColoredEdge(0, 0, 0, 1, 0, 0); addColoredEdge(1, 0, 0, 1, 1, 0); addColoredEdge(1, 1, 0, 0, 1, 0); addColoredEdge(0, 1, 0, 0, 0, 0);
+            addColoredEdge(0, 0, 1, 1, 0, 1); addColoredEdge(1, 0, 1, 1, 1, 1); addColoredEdge(1, 1, 1, 0, 1, 1); addColoredEdge(0, 1, 1, 0, 0, 1);
+            addColoredEdge(0, 0, 0, 0, 0, 1); addColoredEdge(1, 0, 0, 1, 0, 1); addColoredEdge(1, 1, 0, 1, 1, 1); addColoredEdge(0, 1, 0, 0, 1, 1);
 
             const edgeGeo = new THREE.BufferGeometry();
-            edgeGeo.setAttribute('position', new THREE.Float32BufferAttribute(edgeDummyPos, 3));
-            edgeGeo.setAttribute('oklabPos', new THREE.Float32BufferAttribute(edgePositionsOklab, 3));
-            edgeGeo.setAttribute('srgbPos', new THREE.Float32BufferAttribute(edgePositionsRGB, 3));
-            edgeGeo.setAttribute('color', new THREE.Float32BufferAttribute(edgeColors, 3));
+            edgeGeo.setAttribute('position', new THREE.BufferAttribute(edgeDummyPos, 3));
+            edgeGeo.setAttribute('oklabPos', new THREE.BufferAttribute(edgeOklabPos, 3));
+            edgeGeo.setAttribute('srgbPos', new THREE.BufferAttribute(edgeSrgbPos, 3));
+            edgeGeo.setAttribute('color', new THREE.BufferAttribute(edgeColors, 3));
 
             const edgeMat = new THREE.ShaderMaterial({
                 uniforms: { ...uniforms, opacity: { value: 0.8 } },
@@ -393,7 +482,37 @@
         createGamutWireframe();
 
         // --- Data Loading ---
-        let currentInstancedMesh = null;
+        const MAX_INSTANCES = 64;
+        let instancedMesh;
+        let instanceOklabPos, instanceSrgbPos, instanceColor;
+
+        // Initialize InstancedMesh once
+        function initInstancedMesh() {
+            const geometry = new THREE.SphereGeometry(0.02, 16, 16);
+            const material = new THREE.ShaderMaterial({
+                uniforms: uniforms,
+                vertexShader: vertexShaderInstanced,
+                fragmentShader: fragmentShaderCommon
+            });
+
+            instancedMesh = new THREE.InstancedMesh(geometry, material, MAX_INSTANCES);
+            instancedMesh.count = 0; // Start hidden
+            instancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+            instancedMesh.frustumCulled = false; // Critical: Vertex shader moves points outside original bounds
+
+            instanceOklabPos = new Float32Array(MAX_INSTANCES * 3);
+            instanceSrgbPos = new Float32Array(MAX_INSTANCES * 3);
+            instanceColor = new Float32Array(MAX_INSTANCES * 3);
+
+            const geometryAttr = instancedMesh.geometry;
+            geometryAttr.setAttribute('instanceOklabPos', new THREE.InstancedBufferAttribute(instanceOklabPos, 3).setUsage(THREE.DynamicDrawUsage));
+            geometryAttr.setAttribute('instanceSrgbPos', new THREE.InstancedBufferAttribute(instanceSrgbPos, 3).setUsage(THREE.DynamicDrawUsage));
+            geometryAttr.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(instanceColor, 3).setUsage(THREE.DynamicDrawUsage));
+
+            scene.add(instancedMesh);
+        }
+
+        initInstancedMesh();
 
         async function loadData(n) {
             const statusEl = document.getElementById('status');
@@ -404,94 +523,76 @@
                 if (!response.ok) throw new Error(`File not found: ${response.statusText}`);
 
                 const text = await response.text();
+
+                let count = 0;
+                let cursor = 0;
+                const len = text.length;
+
+                // Reusable dummy for matrix update
+                const dummy = new THREE.Object3D();
+                dummy.position.set(0, 0, 0);
+                dummy.updateMatrix();
+                const matrix = dummy.matrix;
+
+                // Split by lines to handle the variable whitespace correctly
                 const lines = text.split('\n');
 
-                const dataPoints = [];
-
-                lines.forEach(line => {
-                    line = line.trim();
-                    if (/^\d+/.test(line)) {
+                for (let i = 0; i < lines.length && count < MAX_INSTANCES; i++) {
+                    let line = lines[i].trim();
+                    if (line.length > 0 && /^\d+/.test(line)) {
                         const parts = line.split(/\s+/);
-                        if (parts.length >= 6) {
-                            const hex = parts[1];
+                        if (parts.length >= 3) {
+                            const hexStr = parts[1];
                             const rgbStr = parts[2];
-                            const rgb = rgbStr.split(',').map(Number);
-                            const oklab = sRGB_to_OKLAB(rgb[0], rgb[1], rgb[2]);
 
-                            dataPoints.push({
-                                rgb: rgb,
-                                oklab: oklab,
-                                hex: hex
-                            });
+                            const rgbParts = rgbStr.split(',');
+                            if (rgbParts.length === 3) {
+                                const r = parseInt(rgbParts[0]);
+                                const g = parseInt(rgbParts[1]);
+                                const b = parseInt(rgbParts[2]);
+
+                                const oklab = sRGB_to_OKLAB(r, g, b);
+
+                                // Update Arrays
+                                const idx3 = count * 3;
+
+                                // Oklab
+                                instanceOklabPos[idx3] = oklab.a;
+                                instanceOklabPos[idx3 + 1] = oklab.L;
+                                instanceOklabPos[idx3 + 2] = oklab.b;
+
+                                // sRGB (Centered and Scaled)
+                                instanceSrgbPos[idx3] = (r / 255 - 0.5) * 0.8;
+                                instanceSrgbPos[idx3 + 1] = g / 255;
+                                instanceSrgbPos[idx3 + 2] = (b / 255 - 0.5) * 0.8;
+
+                                // Color
+                                const col = new THREE.Color(hexStr);
+                                instanceColor[idx3] = col.r;
+                                instanceColor[idx3 + 1] = col.g;
+                                instanceColor[idx3 + 2] = col.b;
+
+                                instancedMesh.setMatrixAt(count, matrix);
+
+                                count++;
+                            }
                         }
                     }
-                });
-
-                // Remove old mesh
-                if (currentInstancedMesh) {
-                    scene.remove(currentInstancedMesh);
-                    currentInstancedMesh.geometry.dispose();
-                    currentInstancedMesh.material.dispose();
-                    currentInstancedMesh = null;
                 }
 
-                if (dataPoints.length > 0) {
-                    const geometry = new THREE.SphereGeometry(0.02, 16, 16); // Reduced segments for performance
-                    const material = new THREE.ShaderMaterial({
-                        uniforms: uniforms,
-                        vertexShader: vertexShaderInstanced,
-                        fragmentShader: fragmentShaderCommon
-                    });
+                instancedMesh.count = count;
+                instancedMesh.instanceMatrix.needsUpdate = true;
+                instancedMesh.geometry.attributes.instanceOklabPos.needsUpdate = true;
+                instancedMesh.geometry.attributes.instanceSrgbPos.needsUpdate = true;
+                instancedMesh.geometry.attributes.instanceColor.needsUpdate = true;
 
-                    const instancedMesh = new THREE.InstancedMesh(geometry, material, dataPoints.length);
-
-                    const instanceOklabPos = new Float32Array(dataPoints.length * 3);
-                    const instanceSrgbPos = new Float32Array(dataPoints.length * 3);
-                    const instanceColor = new Float32Array(dataPoints.length * 3);
-
-                    const dummy = new THREE.Object3D();
-
-                    dataPoints.forEach((pt, i) => {
-                        // Oklab
-                        instanceOklabPos[i * 3] = pt.oklab.a;
-                        instanceOklabPos[i * 3 + 1] = pt.oklab.L;
-                        instanceOklabPos[i * 3 + 2] = pt.oklab.b;
-
-                        // sRGB (Centered and Scaled)
-                        instanceSrgbPos[i * 3] = (pt.rgb[0] / 255 - 0.5) * 0.8;
-                        instanceSrgbPos[i * 3 + 1] = pt.rgb[1] / 255;
-                        instanceSrgbPos[i * 3 + 2] = (pt.rgb[2] / 255 - 0.5) * 0.8;
-
-                        // Color
-                        const col = new THREE.Color(pt.hex);
-                        instanceColor[i * 3] = col.r;
-                        instanceColor[i * 3 + 1] = col.g;
-                        instanceColor[i * 3 + 2] = col.b;
-
-                        // Set identity matrix (we do positioning in shader)
-                        dummy.position.set(0, 0, 0);
-                        dummy.updateMatrix();
-                        instancedMesh.setMatrixAt(i, dummy.matrix);
-                    });
-
-                    geometry.setAttribute('instanceOklabPos', new THREE.InstancedBufferAttribute(instanceOklabPos, 3));
-                    geometry.setAttribute('instanceSrgbPos', new THREE.InstancedBufferAttribute(instanceSrgbPos, 3));
-                    geometry.setAttribute('instanceColor', new THREE.InstancedBufferAttribute(instanceColor, 3));
-
-                    scene.add(instancedMesh);
-                    currentInstancedMesh = instancedMesh;
-                }
-
-                statusEl.textContent = `Loaded ${dataPoints.length} colors (N=${n}).`;
+                statusEl.textContent = `Loaded ${count} colors (N=${n}).`;
                 requestRender();
 
             } catch (err) {
                 console.error(err);
                 statusEl.textContent = `Error: ${err.message}`;
-                if (currentInstancedMesh) {
-                    scene.remove(currentInstancedMesh);
-                    currentInstancedMesh = null;
-                }
+                instancedMesh.count = 0;
                 requestRender();
             }
         }
